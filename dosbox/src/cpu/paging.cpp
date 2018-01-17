@@ -315,8 +315,8 @@ static void PAGING_NewPageFault(PhysPt lin_addr, Bitu page_addr, bool prepare_on
 		 *                   reports an anomaly in it's cache, and then segfaults. core=normal may work,
 		 *                   but is guaranteed to crash if you're in Windows 3.1 and you enter the DOS
 		 *                   box. */
-		LOG_MSG("DEBUG: Using non-recursive page fault for lin=0x%08x page=0x%08x faultcode=%u. Wish me luck.\n",
-			lin_addr,page_addr,faultcode);
+//        LOG_MSG("DEBUG: Using non-recursive page fault for lin=0x%08x page=0x%08x faultcode=%u. Wish me luck.\n",
+//            lin_addr,page_addr,faultcode);
 		throw GuestPageFaultException(lin_addr,page_addr,faultcode);
 	} else {
 		// Save the state of the cpu cores

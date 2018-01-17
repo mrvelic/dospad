@@ -3221,16 +3221,16 @@ void IDEATADevice::writecommand(uint8_t cmd) {
 			uint64_t n;
 
 			n = ((drivehead&0xF)<<24)+(lba[2]<<16)+(lba[1]<<8)+lba[0];
-			LOG_MSG("IDE ATA command %02x dh=0x%02x count=0x%02x lba=%07llx/%07llx\n",cmd,
-				drivehead,count,(unsigned long long)n,
-				(unsigned long long)(phys_sects * phys_cyls * phys_heads));
+//            LOG_MSG("IDE ATA command %02x dh=0x%02x count=0x%02x lba=%07llx/%07llx\n",cmd,
+//                drivehead,count,(unsigned long long)n,
+//                (unsigned long long)(phys_sects * phys_cyls * phys_heads));
 		}
 		else {
-			LOG_MSG("IDE ATA command %02x dh=0x%02x count=0x%02x chs=%02x/%02x/%02x\n",cmd,
-				drivehead,count,(lba[2]<<8)+lba[1],drivehead&0xF,lba[0]);
+//            LOG_MSG("IDE ATA command %02x dh=0x%02x count=0x%02x chs=%02x/%02x/%02x\n",cmd,
+//                drivehead,count,(lba[2]<<8)+lba[1],drivehead&0xF,lba[0]);
 		}
 
-		LOG(LOG_SB,LOG_NORMAL)("IDE ATA command %02x",cmd);
+//        LOG(LOG_SB,LOG_NORMAL)("IDE ATA command %02x",cmd);
 	}
 
 	/* if the drive is asleep, then writing a command wakes it up */
