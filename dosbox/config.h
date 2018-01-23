@@ -96,7 +96,7 @@
 #define C_TARGETCPU X86
 #else
 #if TARGET_CPU_ARM
-#define C_TARGETCPU ARMV4LE
+#define C_TARGETCPU ARMV7LE
 #endif
 #endif
 
