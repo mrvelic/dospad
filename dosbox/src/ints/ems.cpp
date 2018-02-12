@@ -31,28 +31,51 @@
 #include "setup.h"
 #include "support.h"
 #include "cpu.h"
-#include "../save_state.h"
 #include "dma.h"
+#include "control.h"
 
-#define EMM_PAGEFRAME	0xE000
-#define EMM_PAGEFRAME4K	((EMM_PAGEFRAME*16)/4096)
+/* TODO: Make EMS page frame address (and size) user configurable.
+ *       With auto setting to fit in automatically with BIOS and UMBs.
+ *       With limit variable to emulate EMM386.EXE limits (32MB limit in MS-DOS/Win9x).
+ *       With command .COM program in the Z:\ directly to allow enabling/disabling EMS
+ *           and turning on/off the virtual 8086 mode, just like what EMM386.EXE offers in DOS.
+ *       With code to create and maintain vm86 page tables when emulating EMM386.EXE,
+ *           while retaining the 'hardware' based mapping it does now if "mixed" or "board".
+ *       With configuration parameter to control the number of EMS handles.
+ *       With configuration parameter to specify what version EMS to emulate.
+ *       With code to change DOS device EMMXXXX0 <-> EMMQXXX0 depending on when you enable/disable EMS at runtime.
+ *       With runtime enable/disable of VCPI (if nobody is using VCPI).
+ *       With DOSBox option to force EMM OS handle to be allocated from an within an even megabyte if the user
+ *           would rather be able to manage the A20 line without crashing, and another option to specify if
+ *           A20 should be turned on or left off in this case.
+ */
+
+Bitu XMS_EnableA20(bool enable);
+
+unsigned short EMM_PAGEFRAME =      0xE000;
+unsigned short EMM_PAGEFRAME4K =    ((EMM_PAGEFRAME*16)/4096);
+
+Bitu GetEMSPageFrameSegment(void) {
+    return EMM_PAGEFRAME;
+}
+
 #define	EMM_MAX_HANDLES	200				/* 255 Max */
 #define EMM_PAGE_SIZE	(16*1024U)
-#define EMM_MAX_PAGES	(32 * 1024 / 16 )
 #define EMM_MAX_PHYS	4				/* 4 16kb pages in pageframe */
 
 #define EMM_VERSION			0x40
-#define EMM_MINOR_VERSION	0x00
-//#define EMM_MINOR_VERSION	0x30	// emm386 4.48
-#define GEMMIS_VERSION		0x0001	// Version 1.0
+#define EMM_MINOR_VERSION		0x00
+//#define EMM_MINOR_VERSION		0x30	// emm386 4.48
+#define GEMMIS_VERSION			0x0001	// Version 1.0
 
-#define EMM_SYSTEM_HANDLE	0x0000
+#define EMM_SYSTEM_HANDLE		0x0000
 #define NULL_HANDLE			0xffff
 #define	NULL_PAGE			0xffff
 
-#define ENABLE_VCPI 1
-#define ENABLE_V86_STARTUP 0
-
+bool ENABLE_VCPI=true;
+bool ENABLE_V86_STARTUP=false;
+bool zero_int67_if_no_ems=true;
+bool ems_syshandle_on_even_mb=false;
 
 /* EMM errors */
 #define EMM_NO_ERROR			0x00
@@ -75,6 +98,12 @@
 #define EMM_MOVE_OVLAPI			0x97
 #define EMM_NOT_FOUND			0xa0
 
+enum {
+	EMS_NONE=0,			/* no emulation */
+	EMS_MIXED,			/* "mixed mode", default if "true", attempts to please everybody */
+	EMS_BOARD,			/* act like pre-386 expanded memory, provided by an expansion card */
+	EMS_EMM386			/* act like 386+ expanded memory, faked using virtual 8086 mode (EMM386.EXE style) */
+};
 
 struct EMM_Mapping {
 	Bit16u handle;
@@ -89,7 +118,7 @@ struct EMM_Handle {
 	EMM_Mapping page_map[EMM_MAX_PHYS];
 };
 
-static Bitu ems_type;
+static Bitu ems_type = EMS_NONE;
 
 static EMM_Handle emm_handles[EMM_MAX_HANDLES];
 static EMM_Mapping emm_mappings[EMM_MAX_PHYS];
@@ -225,6 +254,12 @@ struct MoveRegion {
 	Bit16u dest_page_seg;
 };
 
+static Bit16u EMM_GetTotalPages(void) {
+	Bitu count=MEM_FreeLargest()/4;
+	if (count>0x7fff) count=0x7fff;
+	return (Bit16u)count;
+}
+
 static Bit16u EMM_GetFreePages(void) {
 	Bitu count=MEM_FreeTotal()/4;
 	if (count>0x7fff) count=0x7fff;
@@ -279,7 +314,9 @@ static Bit8u EMM_AllocateMemory(Bit16u pages,Bit16u & dhandle,bool can_allocate_
 	return EMM_NO_ERROR;
 }
 
-static Bit8u EMM_AllocateSystemHandle(Bit16u pages) {
+static Bit8u EMM_AllocateSystemHandle(Bit16u pages/*NTS: EMS pages are 16KB, this does not refer to 4KB CPU pages*/) {
+	MemHandle mem = 0;
+
 	/* Check for enough free pages */
 	if ((MEM_FreeTotal()/ 4) < pages) { return EMM_OUT_OF_LOG;}
 	Bit16u handle = EMM_SYSTEM_HANDLE;	// emm system handle (reserved for OS usage)
@@ -287,10 +324,28 @@ static Bit8u EMM_AllocateSystemHandle(Bit16u pages) {
 	if (emm_handles[handle].pages != NULL_HANDLE) {
 		MEM_ReleasePages(emm_handles[handle].mem);
 	}
-	MemHandle mem = MEM_AllocatePages(pages*4,false);
+
+	/* NTS: DOSBox 0.74 and older versions of DOSBox-X allocated EMS memory with the "sequential" param == false */
+	/* We now offer the option, if specified in the configuration, to allocate our system handle on an even megabyte.
+	 * Why? Well, if the system handle exists on an even megabyte, then it no longer matters what state the A20
+	 * gate is in. If the DOS game relies on EMM386.EXE but fiddles with the A20 gate while running in virtual 8086
+	 * mode, setting this option can help avoid crashes, where normally clearing the A20 gate prevents EMM386.EXE
+	 * from using it's protected mode structures (GDT, page tables) and the sudden aliasing turns them into junk
+	 * and the system crashes (random contents in DOS conventional memory interpreted as protected mode structures
+	 * doesn't work very well). */
+	mem = 0;
+	if (ems_syshandle_on_even_mb) {
+		mem = MEM_AllocatePages_A20_friendly(pages*4,/*sequential=*/true);
+		if (!mem) LOG(LOG_MISC,LOG_WARN)("EMS: Despite configuration setting, I was unable to allocate EMS system handle on even megabyte");
+	}
+	if (!mem) mem = MEM_AllocatePages(pages*4,/*sequential=*/true);
 	if (!mem) E_Exit("EMS:System handle memory allocation failure");
 	emm_handles[handle].pages = pages;
 	emm_handles[handle].mem = mem;
+	LOG(LOG_MISC,LOG_DEBUG)("EMS: OS handle allocated %u 16KB pages 0x%08lx-0x%08lx",
+		(unsigned int)pages,
+		(unsigned long)mem * 4096UL,
+		((unsigned long)mem * 4096UL) + (pages * 16384UL) - 1);
 	return EMM_NO_ERROR;
 }
 
@@ -351,7 +406,7 @@ static Bit8u EMM_MapSegment(Bitu segment,Bit16u handle,Bit16u log_page) {
 
 	bool valid_segment=false;
 
-	if ((ems_type==1) || (ems_type==3)) {
+	if ((ems_type == EMS_MIXED) || (ems_type == EMS_EMM386)) {
 		if (segment<0xf000+0x1000) valid_segment=true;
 	} else {
 		if ((segment>=0xa000) && (segment<0xb000)) {
@@ -452,16 +507,16 @@ static Bit8u EMM_SavePageMap(Bit16u handle) {
 }
 
 static Bit8u EMM_RestoreMappingTable(void) {
-	Bit8u result;
 	/* Move through the mappings table and setup mapping accordingly */
 	for (Bitu i=0;i<0x40;i++) {
 		/* Skip the pageframe */
 		if ((i>=EMM_PAGEFRAME/0x400) && (i<(EMM_PAGEFRAME/0x400)+EMM_MAX_PHYS)) continue;
-		result=EMM_MapSegment(i<<10,emm_segmentmappings[i].handle,emm_segmentmappings[i].page);
+		EMM_MapSegment(i<<10,emm_segmentmappings[i].handle,emm_segmentmappings[i].page);
 	}
 	for (Bitu i=0;i<EMM_MAX_PHYS;i++) {
-		result=EMM_MapPage(i,emm_mappings[i].handle,emm_mappings[i].page);
+		EMM_MapPage(i,emm_mappings[i].handle,emm_mappings[i].page);
 	}
+
 	return EMM_NO_ERROR;
 }
 static Bit8u EMM_RestorePageMap(Bit16u handle) {
@@ -508,7 +563,7 @@ static Bit8u EMM_PartialPageMapping(void) {
 				mem_writew(data,segment);data+=2;
 				MEM_BlockWrite(data,&emm_mappings[page],sizeof(EMM_Mapping));
 				data+=sizeof(EMM_Mapping);
-			} else if ((ems_type==1) || (ems_type==3) || ((segment>=EMM_PAGEFRAME-0x1000) && (segment<EMM_PAGEFRAME)) || ((segment>=0xa000) && (segment<0xb000))) {
+			} else if ((ems_type == EMS_MIXED) || (ems_type == EMS_EMM386) || ((segment>=EMM_PAGEFRAME-0x1000) && (segment<EMM_PAGEFRAME)) || ((segment>=0xa000) && (segment<0xb000))) {
 				mem_writew(data,segment);data+=2;
 				MEM_BlockWrite(data,&emm_segmentmappings[segment>>10],sizeof(EMM_Mapping));
 				data+=sizeof(EMM_Mapping);
@@ -525,7 +580,7 @@ static Bit8u EMM_PartialPageMapping(void) {
 			if ((segment>=EMM_PAGEFRAME) && (segment<EMM_PAGEFRAME+0x1000)) {
 				Bit16u page = (segment-EMM_PAGEFRAME) / (EMM_PAGE_SIZE>>4);
 				MEM_BlockRead(data,&emm_mappings[page],sizeof(EMM_Mapping));
-			} else if ((ems_type==1) || (ems_type==3) || ((segment>=EMM_PAGEFRAME-0x1000) && (segment<EMM_PAGEFRAME)) || ((segment>=0xa000) && (segment<0xb000))) {
+			} else if ((ems_type == EMS_MIXED) || (ems_type == EMS_EMM386) || ((segment>=EMM_PAGEFRAME-0x1000) && (segment<EMM_PAGEFRAME)) || ((segment>=0xa000) && (segment<0xb000))) {
 				MEM_BlockRead(data,&emm_segmentmappings[segment>>10],sizeof(EMM_Mapping));
 			} else {
 				return EMM_ILL_PHYS;
@@ -723,7 +778,7 @@ static Bitu INT67_Handler(void) {
 		reg_ah=EMM_NO_ERROR;
 		break;
 	case 0x42:		/* Get number of pages */
-		reg_dx=(Bit16u)(MEM_TotalPages()/4);		//Not entirely correct but okay
+		reg_dx=EMM_GetTotalPages();
 		reg_bx=EMM_GetFreePages();
 		reg_ah=EMM_NO_ERROR;
 		break;
@@ -957,6 +1012,10 @@ static Bitu INT67_Handler(void) {
 				reg_ah=EMM_NO_ERROR;
 				}
 				break;
+			case 0x07:		/* VCPI Read CR0 */
+				reg_ah=EMM_NO_ERROR;
+				reg_ebx=CPU_GET_CRX(0);
+				break;
 			case 0x0a:		/* VCPI Get PIC Vector Mappings */
 				reg_bx=vcpi.pic1_remapping;		// master PIC
 				reg_cx=vcpi.pic2_remapping;		// slave PIC
@@ -992,10 +1051,6 @@ static Bitu INT67_Handler(void) {
 				if (new_cr3!=0) new_cr0|=0x80000000;
 				CPU_SET_CRX(0, new_cr0);
 				CPU_SET_CRX(3, new_cr3);
-
-				PhysPt tbaddr=new_gdt_base+(new_tr&0xfff8)+5;
-				Bit8u tb=mem_readb(tbaddr);
-				mem_writeb(tbaddr, tb&0xfd);
 
 				/* Load tables and initialize segment registers */
 				CPU_LGDT(new_gdt_limit, new_gdt_base);
@@ -1087,6 +1142,29 @@ static Bitu VCPI_PM_Handler() {
 	return CBRET_NONE;
 }
 
+bool vcpi_virtual_a20 = true;
+
+/* if we handle the read, we're expected to write over AL/AX */
+bool VCPI_trapio_r(uint16_t port,unsigned int sz) {
+	switch (port) {
+		case 0x92:
+			reg_al = vcpi_virtual_a20?0x02:0x00;
+			return true;
+	};
+
+	return false;
+}
+
+bool VCPI_trapio_w(uint16_t port,uint32_t data,unsigned int sz) {
+	switch (port) {
+		case 0x92:
+			vcpi_virtual_a20 = (data & 2) ? true : false;
+			return true;
+	};
+
+	return false;
+}
+
 static Bitu V86_Monitor() {
 	/* Calculate which interrupt did occur */
 	Bitu int_num=(mem_readw(SegPhys(ss)+(reg_esp & cpu.stack.mask))-0x2803);
@@ -1152,35 +1230,43 @@ static Bitu V86_Monitor() {
 				}
 				break;
 			case 0xe4:		// IN AL,Ib
-				reg_al=(Bit8u)(IO_ReadB(mem_readb((v86_cs<<4)+v86_ip+1))&0xff);
+				if (!VCPI_trapio_r(mem_readb((v86_cs<<4)+v86_ip+1),1))
+					reg_al=(Bit8u)(IO_ReadB(mem_readb((v86_cs<<4)+v86_ip+1))&0xff);
 				mem_writew(SegPhys(ss)+((reg_esp+0) & cpu.stack.mask),v86_ip+2);
 				break;
 			case 0xe5:		// IN AX,Ib
-				reg_ax=(Bit16u)(IO_ReadW(mem_readb((v86_cs<<4)+v86_ip+1))&0xffff);
+				if (!VCPI_trapio_r(mem_readb((v86_cs<<4)+v86_ip+1),2))
+					reg_ax=(Bit16u)(IO_ReadW(mem_readb((v86_cs<<4)+v86_ip+1))&0xffff);
 				mem_writew(SegPhys(ss)+((reg_esp+0) & cpu.stack.mask),v86_ip+2);
 				break;
 			case 0xe6:		// OUT Ib,AL
-				IO_WriteB(mem_readb((v86_cs<<4)+v86_ip+1),reg_al);
+				if (!VCPI_trapio_w(mem_readb((v86_cs<<4)+v86_ip+1),reg_al,1))
+					IO_WriteB(mem_readb((v86_cs<<4)+v86_ip+1),reg_al);
 				mem_writew(SegPhys(ss)+((reg_esp+0) & cpu.stack.mask),v86_ip+2);
 				break;
 			case 0xe7:		// OUT Ib,AX
-				IO_WriteW(mem_readb((v86_cs<<4)+v86_ip+1),reg_ax);
+				if (!VCPI_trapio_w(mem_readb((v86_cs<<4)+v86_ip+1),reg_ax,2))
+					IO_WriteW(mem_readb((v86_cs<<4)+v86_ip+1),reg_ax);
 				mem_writew(SegPhys(ss)+((reg_esp+0) & cpu.stack.mask),v86_ip+2);
 				break;
 			case 0xec:		// IN AL,DX
-				reg_al=(Bit8u)(IO_ReadB(reg_dx)&0xff);
+				if (!VCPI_trapio_r(reg_dx,1))
+					reg_al=(Bit8u)(IO_ReadB(reg_dx)&0xff);
 				mem_writew(SegPhys(ss)+((reg_esp+0) & cpu.stack.mask),v86_ip+1);
 				break;
 			case 0xed:		// IN AX,DX
-				reg_ax=(Bit16u)(IO_ReadW(reg_dx)&0xffff);
+				if (!VCPI_trapio_r(reg_dx,2))
+					reg_ax=(Bit16u)(IO_ReadW(reg_dx)&0xffff);
 				mem_writew(SegPhys(ss)+((reg_esp+0) & cpu.stack.mask),v86_ip+1);
 				break;
 			case 0xee:		// OUT DX,AL
-				IO_WriteB(reg_dx,reg_al);
+				if (!VCPI_trapio_w(reg_dx,reg_al,1))
+					IO_WriteB(reg_dx,reg_al);
 				mem_writew(SegPhys(ss)+((reg_esp+0) & cpu.stack.mask),v86_ip+1);
 				break;
 			case 0xef:		// OUT DX,AX
-				IO_WriteW(reg_dx,reg_ax);
+				if (!VCPI_trapio_w(reg_dx,reg_ax,2))
+					IO_WriteW(reg_dx,reg_ax);
 				mem_writew(SegPhys(ss)+((reg_esp+0) & cpu.stack.mask),v86_ip+1);
 				break;
 			case 0xf0:		// LOCK prefix
@@ -1225,7 +1311,25 @@ static Bitu V86_Monitor() {
 	return CBRET_NONE;
 }
 
+inline void VCPI_iopermw(uint16_t port,bool set) {
+	unsigned char b;
+
+	b = mem_readb(vcpi.private_area+0x3000+0x68+(port>>3));
+	if (set) b |= 1<<(port&7);
+	else b &= ~(1<<(port&7));
+	mem_writeb(vcpi.private_area+0x3000+0x68+(port>>3),b);
+}
+
 static void SetupVCPI() {
+	/* The EMM OS handle is often located just above the 1MB boundary.
+	 * And we're about to write that area directly. So for obvious
+	 * reasons we should enable the A20 gate now. This fixes random
+	 * crashes in v86 mode when a20=mask as opposed to a20=fast. */
+	if ((emm_handles[vcpi.ems_handle].mem<<12) & (1<<20)) {
+		LOG(LOG_MISC,LOG_DEBUG)("EMS:EMM OS handle is associated with memory on an odd megabyte. Enabling A20 gate to avoid corrupting DOS state");
+		XMS_EnableA20(true);
+	}
+
 	vcpi.enabled=false;
 
 	vcpi.ems_handle=0;	// use EMM system handle for VCPI data
@@ -1280,10 +1384,14 @@ static void SetupVCPI() {
 	}
 
 	/* TSS */
-	for (Bitu tse_ct=0; tse_ct<0x68+0x200; tse_ct++) {
+	for (Bitu tse_ct=0; tse_ct<0x68+0x2000/*all 65536 I/O ports*/; tse_ct++) {
 		/* clear the TSS as most entries are not used here */
-		mem_writeb(vcpi.private_area+0x3000,0);
+		mem_writeb(vcpi.private_area+0x3000+tse_ct,0);
 	}
+
+	/* trap some ports */
+	VCPI_iopermw(0x92,true);
+
 	/* Set up the ring0-stack */
 	mem_writed(vcpi.private_area+0x3004,0x00002000);	// esp
 	mem_writed(vcpi.private_area+0x3008,0x00000014);	// ss
@@ -1305,59 +1413,130 @@ static Bitu INT4B_Handler() {
 }
 
 Bitu GetEMSType(Section_prop * section) {
+	std::string emstypestr = section->Get_string("ems");
 	Bitu rtype = 0;
-	std::string emstypestr(section->Get_string("ems"));
-	if (emstypestr=="true") {
-		rtype = 1;	// mixed mode
-	} else if (emstypestr=="emsboard") {
-		rtype = 2;
-	} else if (emstypestr=="emm386") {
-		rtype = 3;
-	} else {
-		rtype = 0;
-	}
+
+	if (emstypestr == "true")
+		rtype = EMS_MIXED;
+	else if (emstypestr == "emsboard")
+		rtype = EMS_BOARD;
+	else if (emstypestr == "emm386")
+		rtype = EMS_EMM386;
+	else
+		rtype = EMS_NONE;
+
 	return rtype;
 }
 
+void setup_EMS_none() {
+	if (zero_int67_if_no_ems) {
+		/* zero INT 67h */
+		phys_writed(0x67*4,0);
+	}
+}
+
+Bitu call_int67 = 0;
 
 class EMS: public Module_base {
 private:
+	Bit16u ems_baseseg;
 	DOS_Device * emm_device;
-	/* location in protected unfreeable memory where the ems name and callback are
-	 * stored  32 bytes.*/
-	static Bit16u ems_baseseg;
 	unsigned int oshandle_memsize_16kb;
 	RealPt old4b_pointer,old67_pointer;
 	CALLBACK_HandlerObject call_vdma,call_vcpi,call_v86mon;
-	Bitu call_int67;
 
 public:
 	EMS(Section* configuration):Module_base(configuration) {
 		emm_device=NULL;
-		ems_type=0;
 
 		/* Virtual DMA interrupt callback */
 		call_vdma.Install(&INT4B_Handler,CB_IRET,"Int 4b vdma");
 		call_vdma.Set_RealVec(0x4b);
 
+		ems_baseseg=0;
 		vcpi.enabled=false;
 		GEMMIS_seg=0;
-		
-		Section_prop * section=static_cast<Section_prop *>(configuration);
-		ems_type=GetEMSType(section);
-		if (ems_type<=0) return;
 
-		if (machine==MCH_PCJR) {
-			ems_type=0;
+		Section_prop * section=static_cast<Section_prop *>(configuration);
+		ems_syshandle_on_even_mb = section->Get_bool("ems system handle on even megabyte");
+		zero_int67_if_no_ems = section->Get_bool("zero int 67h if no ems");
+		ems_type = GetEMSType(section);
+		if (ems_type == EMS_NONE) {
+			setup_EMS_none();
+			return;
+		}
+
+		if (machine == MCH_PCJR) {
+			setup_EMS_none();
+			ems_type = EMS_NONE;
 			LOG_MSG("EMS disabled for PCJr machine");
 			return;
 		}
+
+        LOG_MSG("EMS page frame at 0x%04x-0x%04x",EMM_PAGEFRAME,EMM_PAGEFRAME+0xFFF);
+
+		ENABLE_VCPI = section->Get_bool("vcpi");
+		ENABLE_V86_STARTUP = section->Get_bool("emm386 startup active");
+
+		/* if 286 or lower, EMM386 emulation is impossible */
+		if (CPU_ArchitectureType < CPU_ARCHTYPE_386 && ems_type != EMS_BOARD) {
+			LOG_MSG("CPU is 286 or lower, setting EMS emulation to ems=emsboard and disabling VCPI and v86 startup");
+			ENABLE_V86_STARTUP = false;
+			ems_type = EMS_BOARD;
+			ENABLE_VCPI = false;
+		}
+
+        bool XMS_Active(void);
+
+        /* if XMS is not enabled, EMM386 emulation is impossible.
+         * Real MS-DOS EMM386.EXE will flat out refuse to load if HIMEM.SYS is not loaded.
+         * that also prevents VCPI from working. */
+        if (!XMS_Active() && ems_type != EMS_BOARD) {
+            if (ems_type == EMS_MIXED) {
+                LOG_MSG("EMS changed to board mode and VCPI disabled, because XMS is not enabled.");
+                ems_type = EMS_BOARD;
+            }
+            else if (ems_type == EMS_EMM386) {
+                /* do as MS-DOS does */
+                setup_EMS_none();
+                ems_type = EMS_NONE;
+                LOG_MSG("EMS disabled, EMM386 emulation is impossible when XMS is not enabled");
+                return;
+            }
+
+			ENABLE_V86_STARTUP = false;
+            ENABLE_VCPI = false;
+        }
+
+        /* FIXME: Why zero the BIOS memory size if emulating EMS board mode? */
 		BIOS_ZeroExtendedSize(true);
 
 		dbg_zero_on_ems_allocmem = section->Get_bool("zero memory on ems memory allocation");
-
 		if (dbg_zero_on_ems_allocmem) {
-			LOG_MSG("Debug option enabled: EMS memory allocation will always clear memory block before returning\n");
+			LOG(LOG_MISC,LOG_DEBUG)("Debug option enabled: EMS memory allocation will always clear memory block before returning\n");
+		}
+
+		/* FIXME: VM86 monitor is not stable! */
+		if (ENABLE_V86_STARTUP) {
+			LOG(LOG_MISC,LOG_WARN)("EMM386 virtual 8086 monitor is not stable! Use with caution!");
+		}
+
+		if (ems_type == EMS_BOARD && ENABLE_VCPI) {
+			LOG_MSG("VCPI emulation is incompatible with ems=board. Turning off VCPI emulation");
+			ENABLE_VCPI=false;
+		}
+		if (ems_type != EMS_EMM386 && ENABLE_V86_STARTUP) {
+			/* starting up in virtual 8086 mode makes no sense unless emulating EMM386.EXE */
+			if (ems_type != EMS_MIXED) {
+				/* v86 startup is default. to avoid yelling at the user do not print anything unless
+				 * the user set it to any value other than the default ems=true */
+				LOG_MSG("EMS EMM386.EXE v86 mode is incompatible with ems= setting. Starting up in real mode.");
+			}
+			ENABLE_V86_STARTUP=false;
+		}
+		if (ENABLE_V86_STARTUP && !ENABLE_VCPI) {
+			LOG_MSG("EMS: DOSBox does not support enabling virtual 8086 mode without VCPI.");
+			ENABLE_V86_STARTUP=false;
 		}
 
 		oshandle_memsize_16kb = section->Get_int("ems system handle memory size");
@@ -1365,7 +1544,7 @@ public:
 		oshandle_memsize_16kb = (oshandle_memsize_16kb+15)/16;
 		if (oshandle_memsize_16kb == 0) oshandle_memsize_16kb = 1;
 
-		if (!ems_baseseg) ems_baseseg=DOS_GetMemory(2,"ems_baseseg");	//We have 32 bytes
+		ems_baseseg=DOS_GetMemory(2,"ems_baseseg");	//We have 32 bytes
 
 		/* Add a little hack so it appears that there is an actual ems device installed */
 		char const* emsname="EMMXXXX0";
@@ -1377,7 +1556,7 @@ public:
 
 		/* Register the ems device */
 		//TODO MAYBE put it in the class.
-		emm_device = new device_EMM(ems_type!=2);
+		emm_device = new device_EMM(ems_type != EMS_BOARD);
 		DOS_AddDevice(emm_device);
 
 		/* Clear handle and page tables */
@@ -1396,15 +1575,25 @@ public:
 			emm_segmentmappings[i].handle=NULL_HANDLE;
 		}
 
-		EMM_AllocateSystemHandle(oshandle_memsize_16kb);	// allocate OS-dedicated handle (ems handle zero, 384kb)
+		if (EMM_AllocateSystemHandle(oshandle_memsize_16kb) != EMM_NO_ERROR) { // allocate OS-dedicated handle (ems handle zero, 384kb)
+			LOG_MSG("EMS:Unable to allocate EMS system handle. disabling VCPI");
+			ENABLE_VCPI = false;
+		}
 
-		if (ems_type==3) {
+		if (ems_type == EMS_EMM386) {
 			DMA_SetWrapping(0xffffffff);	// emm386-bug that disables dma wrapping
 		}
 
-		if (!ENABLE_VCPI) return;
+		/* the VCPI emulation requires a large enough OS handle memory region. */
+		if (ENABLE_VCPI && oshandle_memsize_16kb < (0x4000/16384)) { /* at least 16KB */
+			LOG_MSG("EMS:System handle memory size too small (<16KB), disabling VCPI");
+			ENABLE_VCPI = false;
+		}
 
-		if (ems_type!=2) {
+		if (ENABLE_VCPI) {
+			assert(ems_type != EMS_BOARD);
+			LOG(LOG_MISC,LOG_DEBUG)("Enabling VCPI emulation");
+
 			/* Install a callback that handles VCPI-requests in protected mode requests */
 			call_vcpi.Install(&VCPI_PM_Handler,CB_IRETD,"VCPI PM");
 			vcpi.pm_interface=(call_vcpi.Get_callback())*CB_SIZE;
@@ -1424,8 +1613,26 @@ public:
 			mem_writeb(vcpi.private_area+0x2e04,(Bit8u)0x66);
 			mem_writeb(vcpi.private_area+0x2e05,(Bit8u)0xCF);       //A IRETD Instruction
 
-			/* Testcode only, starts up dosbox in v86-mode */
+			/* DOSBox's default EMS emulation provides the EMS memory mapping but without the virtual 8086
+			 * mode. But there are DOS games and demos that assume EMM386.EXE == virtual 8086 mode and will
+			 * fail to detect EMS if the v86 bit in EFLAGS is not set.
+			 *
+			 * Examples:
+			 *   ftp://ftp.scene.org/pub/parties/1994/3s94/demo/friends.zip
+			 *     - Refuses to run unless it detects Expanded memory
+			 *     - Does not detect Expanded memory because it doesn't detect virtual 8086 mode
+			 *     - Therefore, without this option, it is impossible to run the demo. */
 			if (ENABLE_V86_STARTUP) {
+				LOG(LOG_MISC,LOG_DEBUG)("EMS: Now setting up the DOS environment to run in EMM386.EXE virtual 8086 mode");
+
+				/* our V86 state may require A20 enabled to run. the EMM OS handle
+				 * often resides on an odd megabyte */
+				if ((emm_handles[vcpi.ems_handle].mem<<12) & (1<<20)) {
+					LOG(LOG_MISC,LOG_DEBUG)("EMS:EMM OS handle is associated with memory on an odd megabyte. Enabling A20 gate to safely enter V86 mode.");
+					XMS_EnableA20(true);
+				}
+				vcpi_virtual_a20 = true;
+
 				/* Prepare V86-task */
 				CPU_SET_CRX(0, 1);
 				CPU_LGDT(0xff, vcpi.private_area+0x0000);
@@ -1433,12 +1640,21 @@ public:
 				if (CPU_LLDT(0x08)) LOG_MSG("VCPI:Could not load LDT");
 				if (CPU_LTR(0x10)) LOG_MSG("VCPI:Could not load TR");
 
+				/* TODO: Page tables are usually involved as well. That is the "magic"
+				 * behind EMM386.EXE page frames. */
+
+				/* TODO: Also setup (here or in SetupVCPI) the I/O permission bitmap
+				 * so that the V86 monitor can virtualize certain I/O ports. EMM386.EXE
+				 * emulation would demand that we at least virtualize the DMA controller
+				 * I/O ports as MS-DOS does. */
+
+				/* register setup */
 				CPU_Push32(SegValue(gs));
 				CPU_Push32(SegValue(fs));
 				CPU_Push32(SegValue(ds));
 				CPU_Push32(SegValue(es));
 				CPU_Push32(SegValue(ss));
-				CPU_Push32(0x23002);
+				CPU_Push32(0x23002); /* FIXME: Confirm: this is EFLAGS? */
 				CPU_Push32(SegValue(cs));
 				CPU_Push32(reg_eip&0xffff);
 				/* Switch to V86-mode */
@@ -1456,79 +1672,84 @@ public:
  
 		/* Remove ems device */
 		if (emm_device!=NULL) {
-			DOS_DelDevice(emm_device);
+// FIXME: This is being called now after DOS shutdown. Causes a crash!
+//			DOS_DelDevice(emm_device);
 			emm_device=NULL;
 		}
 		GEMMIS_seg=0;
 
 		/* Remove the emsname and callback hack */
 		char buf[32]= { 0 };
-		MEM_BlockWrite(PhysMake(ems_baseseg,0),buf,32);
-		RealSetVec(0x67,old67_pointer);
+		if (ems_baseseg != 0) MEM_BlockWrite(PhysMake(ems_baseseg,0),buf,32);
+		RealSetVec(0x67,zero_int67_if_no_ems ? 0 : old67_pointer);
 
+#if 0 // FIXME
 		/* Release memory allocated to system handle */
 		if (emm_handles[EMM_SYSTEM_HANDLE].pages != NULL_HANDLE) {
 			MEM_ReleasePages(emm_handles[EMM_SYSTEM_HANDLE].mem);
 		}
+#endif
 
 		/* Clear handle and page tables */
 		//TODO
 
-		if ((!ENABLE_VCPI) || (!vcpi.enabled)) return;
-
-		if (cpu.pmode && GETFLAG(VM)) {
-			/* Switch back to real mode if in v86-mode */
-			CPU_SET_CRX(0, 0);
-			CPU_SET_CRX(3, 0);
-			reg_flags&=(~(FLAG_IOPL|FLAG_VM));
-			CPU_LIDT(0x3ff, 0);
-			CPU_SetCPL(0);
+		if (ENABLE_VCPI && vcpi.enabled) {
+			if (cpu.pmode && GETFLAG(VM)) {
+				/* Switch back to real mode if in v86-mode */
+				CPU_SET_CRX(0, 0);
+				CPU_SET_CRX(3, 0);
+				reg_flags&=(~(FLAG_IOPL|FLAG_VM));
+				CPU_LIDT(0x3ff, 0);
+				CPU_SetCPL(0);
+			}
 		}
 	}
 };
 		
 static EMS* test = NULL;
 
+void CALLBACK_DeAllocate(Bitu in);
+
 void EMS_DoShutDown() {
 	if (test != NULL) {
 		delete test;
 		test = NULL;
 	}
+    if (call_int67 != 0) {
+        CALLBACK_DeAllocate(call_int67);
+        call_int67 = 0;
+    }
+}
+
+void EMS_PickPageFrame(void) {
+    /* the EMS page frame needs to move depending on IBM PC or PC-98 emulation.
+     * IBM PC emulation can put the page frame at 0xE000 (as DOSBox has always done).
+     * PC-98 emulation needs to move the page frame down because 0xE000 is taken by the 4th EGC bitplane. */
+    EMM_PAGEFRAME =      IS_PC98_ARCH ? 0xD000 : 0xE000;
+    EMM_PAGEFRAME4K =    ((EMM_PAGEFRAME*16)/4096);
+}
+
+void EMS_DOSBoot(Section* /*sec*/) {
+    EMS_PickPageFrame();
 }
 
 void EMS_ShutDown(Section* /*sec*/) {
 	EMS_DoShutDown();
 }
 
-void EMS_Init(Section* sec) {
-	assert(test == NULL);
-	test = new EMS(sec);
-	sec->AddDestroyFunction(&EMS_ShutDown,true);
+void EMS_Startup(Section* sec) {
+	if (test == NULL) {
+		LOG(LOG_MISC,LOG_DEBUG)("Allocating EMS emulation");
+		test = new EMS(control->GetSection("dos"));
+	}
 }
 
-//Initialize static members
-Bit16u EMS::ems_baseseg = 0;
+void EMS_Init() {
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing EMS expanded memory services");
 
-
-
-//save state support
-namespace
-{
-class SerializeEMS : public SerializeGlobalPOD
-{
-public:
-    SerializeEMS() : SerializeGlobalPOD("EMS")
-    {
-        registerPOD(emm_handles);
-        registerPOD(emm_mappings);
-        registerPOD(emm_segmentmappings);
-        registerPOD(GEMMIS_seg);
-        registerPOD(vcpi.enabled);
-        registerPOD(vcpi.ems_handle);
-        registerPOD(vcpi.pm_interface);
-        registerPOD(vcpi.private_area);
-        registerPOD(vcpi.pic1_remapping);
-        registerPOD(vcpi.pic2_remapping);
-    }
-} dummy;
+	AddExitFunction(AddExitFunctionFuncPair(EMS_ShutDown),true);
+	AddVMEventFunction(VM_EVENT_RESET,AddVMEventFunctionFuncPair(EMS_ShutDown));
+    AddVMEventFunction(VM_EVENT_DOS_BOOT,AddVMEventFunctionFuncPair(EMS_DOSBoot));
+	AddVMEventFunction(VM_EVENT_DOS_EXIT_BEGIN,AddVMEventFunctionFuncPair(EMS_ShutDown));
 }
+

@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2002-2015  The DOSBox Team
+ *  Copyright (C) 2002-2013  The DOSBox Team
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -17,6 +17,8 @@
  */
 
 /* Jumps */
+
+extern bool enable_fpu;
 
 /* All Byte general instructions */
 #define ADDB(op1,op2,load,save)								\
@@ -415,21 +417,21 @@
 #define SHLB(op1,op2,load,save)								\
 	if (!op2) break;										\
 	lf_var1b=load(op1);lf_var2b=op2;				\
-	lf_resb=lf_var1b << lf_var2b;			\
+	lf_resb=(lf_var2b < 8) ? (lf_var1b << lf_var2b) : 0;			\
 	save(op1,lf_resb);								\
 	lflags.type=t_SHLb;
 
 #define SHLW(op1,op2,load,save)								\
 	if (!op2) break;										\
 	lf_var1w=load(op1);lf_var2b=op2 ;				\
-	lf_resw=lf_var1w << lf_var2b;			\
+	lf_resw=(lf_var2b < 16) ? (lf_var1w << lf_var2b) : 0;			\
 	save(op1,lf_resw);								\
 	lflags.type=t_SHLw;
 
 #define SHLD(op1,op2,load,save)								\
 	if (!op2) break;										\
 	lf_var1d=load(op1);lf_var2b=op2;				\
-	lf_resd=lf_var1d << lf_var2b;			\
+	lf_resd=(lf_var2b < 32) ? (lf_var1d << lf_var2b) : 0;			\
 	save(op1,lf_resd);								\
 	lflags.type=t_SHLd;
 
@@ -437,21 +439,21 @@
 #define SHRB(op1,op2,load,save)								\
 	if (!op2) break;										\
 	lf_var1b=load(op1);lf_var2b=op2;				\
-	lf_resb=lf_var1b >> lf_var2b;			\
+	lf_resb=(lf_var2b < 8) ? (lf_var1b >> lf_var2b) : 0;			\
 	save(op1,lf_resb);								\
 	lflags.type=t_SHRb;
 
 #define SHRW(op1,op2,load,save)								\
 	if (!op2) break;										\
 	lf_var1w=load(op1);lf_var2b=op2;				\
-	lf_resw=lf_var1w >> lf_var2b;			\
+	lf_resw=(lf_var2b < 16) ? (lf_var1w >> lf_var2b) : 0;			\
 	save(op1,lf_resw);								\
 	lflags.type=t_SHRw;
 
 #define SHRD(op1,op2,load,save)								\
 	if (!op2) break;										\
 	lf_var1d=load(op1);lf_var2b=op2;				\
-	lf_resd=lf_var1d >> lf_var2b;			\
+	lf_resd=(lf_var2b < 32) ? (lf_var1d >> lf_var2b) : 0;			\
 	save(op1,lf_resd);								\
 	lflags.type=t_SHRd;
 
@@ -631,10 +633,14 @@
 		lflags.type=t_UNKNOWN;								\
 	}
 
+#define PARITY16(x)  (parity_lookup[((x)>>8)&0xff]^parity_lookup[(x)&0xff]^FLAG_PF)
+#define PARITY32(x)  (PARITY16((x)&0xffff)^PARITY16(((x)>>16)&0xffff)^FLAG_PF)
+
 #define MULB(op1,load,save)									\
 	reg_ax=reg_al*load(op1);								\
 	FillFlagsNoCFOF();										\
 	SETFLAGBIT(ZF,reg_al == 0);								\
+	SETFLAGBIT(PF,PARITY16(reg_ax));								\
 	if (reg_ax & 0xff00) {									\
 		SETFLAGBIT(CF,true);SETFLAGBIT(OF,true);			\
 	} else {												\
@@ -648,6 +654,7 @@
 	reg_dx=(Bit16u)(tempu >> 16);							\
 	FillFlagsNoCFOF();										\
 	SETFLAGBIT(ZF,reg_ax == 0);								\
+	SETFLAGBIT(PF,PARITY16(reg_ax)^PARITY16(reg_dx)^FLAG_PF);						\
 	if (reg_dx) {											\
 		SETFLAGBIT(CF,true);SETFLAGBIT(OF,true);			\
 	} else {												\
@@ -662,6 +669,7 @@
 	reg_edx=(Bit32u)(tempu >> 32);							\
 	FillFlagsNoCFOF();										\
 	SETFLAGBIT(ZF,reg_eax == 0);							\
+	SETFLAGBIT(PF,PARITY32(reg_eax)^PARITY32(reg_edx)^FLAG_PF);						\
 	if (reg_edx) {											\
 		SETFLAGBIT(CF,true);SETFLAGBIT(OF,true);			\
 	} else {												\
@@ -679,6 +687,13 @@
 	if (quo>0xff) EXCEPTION(0);								\
 	reg_ah=rem;												\
 	reg_al=quo8;											\
+	FillFlags();											\
+	SETFLAGBIT(AF,0);/*FIXME*/									\
+	SETFLAGBIT(SF,0);/*FIXME*/									\
+	SETFLAGBIT(OF,0);/*FIXME*/									\
+	SETFLAGBIT(ZF,(rem==0)&&((quo8&1)!=0));								\
+	SETFLAGBIT(CF,((rem&3) >= 1 && (rem&3) <= 2)); \
+	SETFLAGBIT(PF,parity_lookup[rem&0xff]^parity_lookup[quo8&0xff]^FLAG_PF);					\
 }
 
 
@@ -693,6 +708,13 @@
 	if (quo!=(Bit32u)quo16) EXCEPTION(0);					\
 	reg_dx=rem;												\
 	reg_ax=quo16;											\
+	FillFlags();											\
+	SETFLAGBIT(AF,0);/*FIXME*/									\
+	SETFLAGBIT(SF,0);/*FIXME*/									\
+	SETFLAGBIT(OF,0);/*FIXME*/									\
+	SETFLAGBIT(ZF,(rem==0)&&((quo16&1)!=0));								\
+	SETFLAGBIT(CF,((rem&3) >= 1 && (rem&3) <= 2)); \
+	SETFLAGBIT(PF,PARITY16(rem&0xffff)^PARITY16(quo16&0xffff)^FLAG_PF);					\
 }
 
 #define DIVD(op1,load,save)									\
@@ -706,6 +728,13 @@
 	if (quo!=(Bit64u)quo32) EXCEPTION(0);					\
 	reg_edx=rem;											\
 	reg_eax=quo32;											\
+	FillFlags();											\
+	SETFLAGBIT(AF,0);/*FIXME*/									\
+	SETFLAGBIT(SF,0);/*FIXME*/									\
+	SETFLAGBIT(OF,0);/*FIXME*/									\
+	SETFLAGBIT(ZF,(rem==0)&&((quo32&1)!=0));								\
+	SETFLAGBIT(CF,((rem&3) >= 1 && (rem&3) <= 2)); \
+	SETFLAGBIT(PF,PARITY32(rem&0xffffffff)^PARITY32(quo32&0xffffffff)^FLAG_PF);					\
 }
 
 
@@ -719,6 +748,13 @@
 	if (quo!=(Bit16s)quo8s) EXCEPTION(0);					\
 	reg_ah=rem;												\
 	reg_al=quo8s;											\
+	FillFlags();											\
+	SETFLAGBIT(AF,0);/*FIXME*/									\
+	SETFLAGBIT(SF,0);/*FIXME*/									\
+	SETFLAGBIT(OF,0);/*FIXME*/									\
+	SETFLAGBIT(ZF,(rem==0)&&((quo8s&1)!=0));								\
+	SETFLAGBIT(CF,((rem&3) >= 1 && (rem&3) <= 2)); \
+	SETFLAGBIT(PF,parity_lookup[rem&0xff]^parity_lookup[quo8s&0xff]^FLAG_PF);					\
 }
 
 
@@ -733,6 +769,13 @@
 	if (quo!=(Bit32s)quo16s) EXCEPTION(0);					\
 	reg_dx=rem;												\
 	reg_ax=quo16s;											\
+	FillFlags();											\
+	SETFLAGBIT(AF,0);/*FIXME*/									\
+	SETFLAGBIT(SF,0);/*FIXME*/									\
+	SETFLAGBIT(OF,0);/*FIXME*/									\
+	SETFLAGBIT(ZF,(rem==0)&&((quo16s&1)!=0));								\
+	SETFLAGBIT(CF,((rem&3) >= 1 && (rem&3) <= 2)); \
+	SETFLAGBIT(PF,PARITY16(rem&0xffff)^PARITY16(quo16s&0xffff)^FLAG_PF);					\
 }
 
 #define IDIVD(op1,load,save)								\
@@ -746,6 +789,13 @@
 	if (quo!=(Bit64s)quo32s) EXCEPTION(0);					\
 	reg_edx=rem;											\
 	reg_eax=quo32s;											\
+	FillFlags();											\
+	SETFLAGBIT(AF,0);/*FIXME*/									\
+	SETFLAGBIT(SF,0);/*FIXME*/									\
+	SETFLAGBIT(OF,0);/*FIXME*/									\
+	SETFLAGBIT(ZF,(rem==0)&&((quo32s&1)!=0));								\
+	SETFLAGBIT(CF,((rem&3) >= 1 && (rem&3) <= 2)); \
+	SETFLAGBIT(PF,PARITY32(rem&0xffffffff)^PARITY32(quo32s&0xffffffff)^FLAG_PF);					\
 }
 
 #define IMULB(op1,load,save)								\
@@ -818,12 +868,29 @@
 	}														\
 }
 
+#if CPU_CORE == CPU_ARCHTYPE_8086
+#  define CPU_SHIFTOP_MASK(x,m) ((x) & 0xff)
+#else
+#  define CPU_SHIFTOP_MASK(x,m) ((x) & 0x1f)
+#endif
+
+/* FIXME: For 8086 core we care mostly about whether or not SHL/SHR emulate the non-masked shift count.
+ *        Note that running this code compiled for Intel processors naturally imposes the shift count,
+ *        compilers generate a shift instruction and do not consider the CPU masking the bit count.
+ *
+ *        unsigned int a = 0x12345678,b = 0x20,c;
+ *        c = a << b;      <-- on Intel x86 builds, c == a because GCC will compile to shl eax,cl and Intel processors will act like c == a << (b&0x1F).
+ *
+ *        What we care about is that shift counts greater than or equal to the width of the target register come out to zero,
+ *        or for SAR, that all bits become copies of the sign bit. When emulating the 8086 we want DOS programs to be able to
+ *        test that we are an 8086 by executing shl ax,cl with cl == 32 and to get AX == 0 as a result instead of AX unchanged.
+ *        the shift count mask test is one of the several tests DOS programs may do to differentiate 8086 from 80186. */
 #define GRP2B(blah)											\
 {															\
 	GetRM;Bitu which=(rm>>3)&7;								\
 	if (rm >= 0xc0) {										\
 		GetEArb;											\
-		Bit8u val=blah & 0x1f;								\
+		Bit8u val=CPU_SHIFTOP_MASK(blah,7);								\
 		switch (which)	{									\
 		case 0x00:ROLB(*earb,val,LoadRb,SaveRb);break;		\
 		case 0x01:RORB(*earb,val,LoadRb,SaveRb);break;		\
@@ -836,7 +903,7 @@
 		}													\
 	} else {												\
 		GetEAa;												\
-		Bit8u val=blah & 0x1f;								\
+		Bit8u val=CPU_SHIFTOP_MASK(blah,7);								\
 		switch (which) {									\
 		case 0x00:ROLB(eaa,val,LoadMb,SaveMb);break;		\
 		case 0x01:RORB(eaa,val,LoadMb,SaveMb);break;		\
@@ -857,7 +924,7 @@
 	GetRM;Bitu which=(rm>>3)&7;								\
 	if (rm >= 0xc0) {										\
 		GetEArw;											\
-		Bit8u val=blah & 0x1f;								\
+		Bit8u val=CPU_SHIFTOP_MASK(blah,15);								\
 		switch (which)	{									\
 		case 0x00:ROLW(*earw,val,LoadRw,SaveRw);break;		\
 		case 0x01:RORW(*earw,val,LoadRw,SaveRw);break;		\
@@ -870,7 +937,7 @@
 		}													\
 	} else {												\
 		GetEAa;												\
-		Bit8u val=blah & 0x1f;								\
+		Bit8u val=CPU_SHIFTOP_MASK(blah,15);								\
 		switch (which) {									\
 		case 0x00:ROLW(eaa,val,LoadMw,SaveMw);break;		\
 		case 0x01:RORW(eaa,val,LoadMw,SaveMw);break;		\
@@ -890,7 +957,7 @@
 	GetRM;Bitu which=(rm>>3)&7;								\
 	if (rm >= 0xc0) {										\
 		GetEArd;											\
-		Bit8u val=blah & 0x1f;								\
+		Bit8u val=CPU_SHIFTOP_MASK(blah,31);								\
 		switch (which)	{									\
 		case 0x00:ROLD(*eard,val,LoadRd,SaveRd);break;		\
 		case 0x01:RORD(*eard,val,LoadRd,SaveRd);break;		\
@@ -903,7 +970,7 @@
 		}													\
 	} else {												\
 		GetEAa;												\
-		Bit8u val=blah & 0x1f;								\
+		Bit8u val=CPU_SHIFTOP_MASK(blah,31);								\
 		switch (which) {									\
 		case 0x00:ROLD(eaa,val,LoadMd,SaveMd);break;		\
 		case 0x01:RORD(eaa,val,LoadMd,SaveMd);break;		\

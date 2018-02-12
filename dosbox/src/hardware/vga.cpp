@@ -121,12 +121,19 @@
 #include "video.h"
 #include "pic.h"
 #include "vga.h"
+#include "inout.h"
 #include "programs.h"
 #include "support.h"
 #include "setup.h"
-#include "../save_state.h"
+#include "timer.h"
 #include "mem.h"
 #include "util_units.h"
+#include "control.h"
+#include "pc98_cg.h"
+#include "pc98_dac.h"
+#include "pc98_gdc.h"
+#include "pc98_gdc_const.h"
+#include "mixer.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -135,9 +142,26 @@
 
 using namespace std;
 
+extern int                          vga_memio_delay_ns;
+extern bool                         gdc_5mhz_mode;
+extern bool                         GDC_vsync_interrupt;
+extern uint8_t                      GDC_display_plane;
+
+extern uint8_t                      pc98_gdc_tile_counter;
+extern uint8_t                      pc98_gdc_modereg;
+extern uint8_t                      pc98_gdc_vramop;
+extern egc_quad                     pc98_gdc_tiles;
+
+extern uint8_t                      pc98_egc_srcmask[2]; /* host given (Neko: egc.srcmask) */
+extern uint8_t                      pc98_egc_maskef[2]; /* effective (Neko: egc.mask2) */
+extern uint8_t                      pc98_egc_mask[2]; /* host given (Neko: egc.mask) */
+
 VGA_Type vga;
 SVGA_Driver svga;
 int enableCGASnow;
+int vesa_modelist_cap = 0;
+int vesa_mode_width_cap = 0;
+int vesa_mode_height_cap = 0;
 bool vga_3da_polled = false;
 bool vga_page_flip_occurred = false;
 bool enable_page_flip_debugging_marker = false;
@@ -148,6 +172,12 @@ bool vga_enable_3C6_ramdac = false;
 bool vga_sierra_lock_565 = false;
 bool enable_vga_resize_delay = false;
 bool vga_ignore_hdispend_change_if_smaller = false;
+bool ignore_vblank_wraparound = false;
+bool vga_double_buffered_line_compare = false;
+bool pc98_allow_scanline_effect = true;
+bool pc98_allow_4_display_partitions = false;
+bool pc98_graphics_hide_odd_raster_200line = false;
+bool gdc_analog = true;
 
 unsigned int vga_display_start_hretrace = 0;
 float hretrace_fx_avg_weight = 3;
@@ -161,6 +191,21 @@ bool allow_vesa_15bpp = true;
 bool allow_vesa_8bpp = true;
 bool allow_vesa_4bpp = true;
 bool allow_vesa_tty = true;
+
+void gdc_5mhz_mode_update_vars(void);
+void pc98_port6A_command_write(unsigned char b);
+void pc98_wait_write(Bitu port,Bitu val,Bitu iolen);
+void pc98_crtc_write(Bitu port,Bitu val,Bitu iolen);
+void pc98_port68_command_write(unsigned char b);
+Bitu pc98_crtc_read(Bitu port,Bitu iolen);
+Bitu pc98_a1_read(Bitu port,Bitu iolen);
+void pc98_a1_write(Bitu port,Bitu val,Bitu iolen);
+void pc98_gdc_write(Bitu port,Bitu val,Bitu iolen);
+Bitu pc98_gdc_read(Bitu port,Bitu iolen);
+Bitu pc98_egc4a0_read(Bitu port,Bitu iolen);
+void pc98_egc4a0_write(Bitu port,Bitu val,Bitu iolen);
+Bitu pc98_egc4a0_read_warning(Bitu port,Bitu iolen);
+void pc98_egc4a0_write_warning(Bitu port,Bitu val,Bitu iolen);
 
 void page_flip_debug_notify() {
 	if (enable_page_flip_debugging_marker)
@@ -248,7 +293,7 @@ void VGA_StartResize(Bitu delay /*=50*/) {
 
 #define IS_RESET ((vga.seq.reset&0x3)!=0x3)
 #define IS_SCREEN_ON ((vga.seq.clocking_mode&0x20)==0)
-static bool hadReset = false;
+//static bool hadReset = false;
 
 // disabled for later improvement
 // Idea behind this: If the sequencer was reset and screen off we can
@@ -382,7 +427,6 @@ public:
 			WriteOut("Video refresh rate locked to %.3ffps\n",vga_force_refresh_rate);
 		else
 			WriteOut("Video refresh rate unlocked\n");
-
 	}
 };
 
@@ -427,14 +471,35 @@ static inline int int_log2(int val) {
 	return log;
 }
 
+extern bool pcibus_enable;
+extern int hack_lfb_yadjust;
+extern uint8_t GDC_display_plane_wait_for_vsync;
 
-void VGA_Init(Section* sec) {
-	Section_prop * section=static_cast<Section_prop *>(sec);
+void VGA_VsyncUpdateMode(VGA_Vsync vsyncmode);
+
+void VGA_Reset(Section*) {
+	Section_prop * section=static_cast<Section_prop *>(control->GetSection("dosbox"));
 	string str;
+    int i;
+
+	LOG(LOG_MISC,LOG_DEBUG)("VGA_Reset() reinitializing VGA emulation");
+
+    GDC_display_plane_wait_for_vsync = section->Get_bool("pc-98 buffer page flip");
+    pc98_allow_scanline_effect = section->Get_bool("pc-98 allow scanline effect");
+
+    // whether the GDC is running at 2.5MHz or 5.0MHz.
+    // Some games require the GDC to run at 5.0MHz.
+    // To enable these games we default to 5.0MHz.
+    // NTS: There are also games that refuse to run if 5MHz switched on (TH03)
+    gdc_5mhz_mode = section->Get_bool("pc-98 start gdc at 5mhz");
+
+    i = section->Get_int("pc-98 allow 4 display partition graphics");
+    pc98_allow_4_display_partitions = (i < 0/*auto*/ || i == 1/*on*/);
+    // TODO: "auto" will default to true if old PC-9801, false if PC-9821, or
+    //       a more refined automatic choice according to actual hardware.
 
 	vga_force_refresh_rate = -1;
 	str=section->Get_string("forcerate");
-	//LOG_MSG("forcerate I got '%s'\n",str.c_str());
 	if (str == "ntsc")
 		vga_force_refresh_rate = 60000.0 / 1001;
 	else if (str == "pal")
@@ -453,16 +518,19 @@ void VGA_Init(Section* sec) {
 		vga_force_refresh_rate = atof(str.c_str());
 	}
 
-	extern int hack_lfb_yadjust;
-
 	enableCGASnow = section->Get_bool("cgasnow");
+	vesa_modelist_cap = section->Get_int("vesa modelist cap");
+	vesa_mode_width_cap = section->Get_int("vesa modelist width limit");
+	vesa_mode_height_cap = section->Get_int("vesa modelist height limit");
 	vga_enable_3C6_ramdac = section->Get_bool("sierra ramdac");
 	vga_enable_hpel_effects = section->Get_bool("allow hpel effects");
 	vga_sierra_lock_565 = section->Get_bool("sierra ramdac lock 565");
-	vga_enable_hretrace_effects = section->Get_bool("allow hretrace effects");
 	hretrace_fx_avg_weight = section->Get_double("hretrace effect weight");
+	ignore_vblank_wraparound = section->Get_bool("ignore vblank wraparound");
+	vga_enable_hretrace_effects = section->Get_bool("allow hretrace effects");
 	enable_page_flip_debugging_marker = section->Get_bool("page flip debug line");
 	enable_vretrace_poll_debugging_marker = section->Get_bool("vertical retrace poll debug line");
+	vga_double_buffered_line_compare = section->Get_bool("double-buffered line compare");
 	hack_lfb_yadjust = section->Get_int("vesa lfb base scanline adjust");
 	allow_vesa_lowres_modes = section->Get_bool("allow low resolution vesa modes");
 	vesa12_modes_32bpp = section->Get_bool("vesa vbe 1.2 modes are 32bpp");
@@ -491,6 +559,44 @@ void VGA_Init(Section* sec) {
 
 	vga.draw.resizing=false;
 	vga.mode=M_ERROR;			//For first init
+
+	vga_memio_delay_ns = section->Get_int("vmemdelay");
+	if (vga_memio_delay_ns < 0) {
+		if (IS_EGAVGA_ARCH) {
+			if (pcibus_enable) {
+				/* some delay based on PCI bus protocol with frame start, turnaround, and burst transfer */
+				double t = (1000000000.0 * clockdom_PCI_BCLK.freq_div * (1/*turnaround*/+1/*frame start*/+1/*burst*/-0.25/*fudge*/)) / clockdom_PCI_BCLK.freq;
+				vga_memio_delay_ns = (int)floor(t);
+			}
+			else {
+				/* very optimistic setting, ISA bus cycles are longer than 2, but also the 386/486/Pentium pipeline
+				 * instruction decoding. so it's not a matter of sucking up enough CPU cycle counts to match the
+				 * duration of a memory I/O cycle, because real hardware probably has another instruction decode
+				 * going while it does it.
+				 *
+				 * this is long enough to fix some demo's raster effects to work properly but not enough to
+				 * significantly bring DOS games to a crawl. Apparently, this also fixes Future Crew "Panic!"
+				 * by making the shadebob take long enough to allow the 3D rotating dot object to finish it's
+				 * routine just in time to become the FC logo, instead of sitting there waiting awkwardly
+				 * for 3-5 seconds. */
+				double t = (1000000000.0 * clockdom_ISA_BCLK.freq_div * 3.75) / clockdom_ISA_BCLK.freq;
+				vga_memio_delay_ns = (int)floor(t);
+			}
+		}
+		else if (machine == MCH_CGA || machine == MCH_HERC) {
+			/* default IBM PC/XT 4.77MHz timing. this is carefully tuned so that Trixter's CGA test program
+			 * times our CGA emulation as having about 305KB/sec reading speed. */
+			double t = (1000000000.0 * clockdom_ISA_OSC.freq_div * 143) / (clockdom_ISA_OSC.freq * 3);
+			vga_memio_delay_ns = (int)floor(t);
+		}
+		else {
+			/* dunno. pick something */
+			double t = (1000000000.0 * clockdom_ISA_BCLK.freq_div * 6) / clockdom_ISA_BCLK.freq;
+			vga_memio_delay_ns = (int)floor(t);
+		}
+	}
+
+	LOG(LOG_VGA,LOG_DEBUG)("VGA memory I/O delay %uns",vga_memio_delay_ns);
 
 	/* mainline compatible vmemsize (in MB)
 	 * plus vmemsizekb for KB-level control.
@@ -537,7 +643,12 @@ void VGA_Init(Section* sec) {
 			else vga.vmemsize = _KB_bytes(256);
 			break;
 		case MCH_VGA:
-			if (vga.vmemsize < _KB_bytes(256)) vga.vmemsize = _KB_bytes(256);
+            if (enable_pc98_jump) {
+                if (vga.vmemsize < _KB_bytes(512)) vga.vmemsize = _KB_bytes(512);
+            }
+            else {
+                if (vga.vmemsize < _KB_bytes(256)) vga.vmemsize = _KB_bytes(256);
+            }
 			break;
 		case MCH_AMSTRAD:
 			if (vga.vmemsize < _KB_bytes(64)) vga.vmemsize = _KB_bytes(64); /* FIXME: Right? */
@@ -550,7 +661,7 @@ void VGA_Init(Section* sec) {
 	SVGA_Setup_Driver();		// svga video memory size is set here, possibly over-riding the user's selection
 	LOG(LOG_VGA,LOG_NORMAL)("Video RAM: %uKB",vga.vmemsize>>10);
 
-	VGA_SetupMemory(sec);		// memory is allocated here
+	VGA_SetupMemory();		// memory is allocated here
 	VGA_SetupMisc();
 	VGA_SetupDAC();
 	VGA_SetupGFX();
@@ -563,7 +674,312 @@ void VGA_Init(Section* sec) {
 /* Generate tables */
 	VGA_SetCGA2Table(0,1);
 	VGA_SetCGA4Table(0,1,2,3);
+
+	Section_prop * section2=static_cast<Section_prop *>(control->GetSection("vsync"));
+
+	const char * vsyncmodestr;
+	vsyncmodestr=section2->Get_string("vsyncmode");
+	VGA_Vsync vsyncmode;
+	if (!strcasecmp(vsyncmodestr,"off")) vsyncmode=VS_Off;
+	else if (!strcasecmp(vsyncmodestr,"on")) vsyncmode=VS_On;
+	else if (!strcasecmp(vsyncmodestr,"force")) vsyncmode=VS_Force;
+	else if (!strcasecmp(vsyncmodestr,"host")) vsyncmode=VS_Host;
+	else {
+		vsyncmode=VS_Off;
+		LOG_MSG("Illegal vsync type %s, falling back to off.",vsyncmodestr);
+	}
+	void change_output(int output);
+	change_output(8);
+	VGA_VsyncUpdateMode(vsyncmode);
+
+	const char * vsyncratestr;
+	vsyncratestr=section2->Get_string("vsyncrate");
+	double vsyncrate=70;
+	if (!strcasecmp(vsyncmodestr,"host")) {
+#if defined (WIN32)
+		DEVMODE	devmode;
+
+		if (EnumDisplaySettings(NULL, ENUM_CURRENT_SETTINGS, &devmode))
+			vsyncrate=devmode.dmDisplayFrequency;
+		else
+			sscanf(vsyncratestr,"%lf",&vsyncrate);
+#endif
+	}
+	else {
+		sscanf(vsyncratestr,"%lf",&vsyncrate);
+	}
+
+	vsync.period = (1000.0F)/vsyncrate;
+
+	// TODO: Code to remove programs added by PROGRAMS_MakeFile
+
+	if (machine == MCH_CGA) PROGRAMS_MakeFile("CGASNOW.COM",CGASNOW_ProgramStart);
+	PROGRAMS_MakeFile("VFRCRATE.COM",VFRCRATE_ProgramStart);
+}
+
+extern void VGA_TweakUserVsyncOffset(float val);
+void INT10_PC98_CurMode_Relocate(void);
+void VGA_UnsetupMisc(void);
+void VGA_UnsetupAttr(void);
+void VGA_UnsetupDAC(void);
+void VGA_UnsetupGFX(void);
+void VGA_UnsetupSEQ(void);
+
+#define gfx(blah) vga.gfx.blah
+#define seq(blah) vga.seq.blah
+#define crtc(blah) vga.crtc.blah
+
+void VGA_OnEnterPC98(Section *sec) {
+    VGA_UnsetupMisc();
+    VGA_UnsetupAttr();
+    VGA_UnsetupDAC();
+    VGA_UnsetupGFX();
+    VGA_UnsetupSEQ();
+
+    LOG_MSG("PC-98: GDC is running at %.1fMHz.",gdc_5mhz_mode ? 5.0 : 2.5);
+
+    pc98_egc_srcmask[0] = 0xFF;
+    pc98_egc_srcmask[1] = 0xFF;
+    pc98_egc_maskef[0] = 0xFF;
+    pc98_egc_maskef[1] = 0xFF;
+    pc98_egc_mask[0] = 0xFF;
+    pc98_egc_mask[1] = 0xFF;
+
+    for (unsigned int i=0;i < 8;i++)
+        pc98_pal_digital[i] = i;
+
+    for (unsigned int i=0;i < 8;i++) {
+        pc98_pal_analog[(i*3) + 0] = (i & 4) ? 0x0F : 0x00;
+        pc98_pal_analog[(i*3) + 1] = (i & 2) ? 0x0F : 0x00;
+        pc98_pal_analog[(i*3) + 2] = (i & 1) ? 0x0F : 0x00;
+
+        if (i != 0) {
+            pc98_pal_analog[((i+8)*3) + 0] = (i & 4) ? 0x0A : 0x00;
+            pc98_pal_analog[((i+8)*3) + 1] = (i & 2) ? 0x0A : 0x00;
+            pc98_pal_analog[((i+8)*3) + 2] = (i & 1) ? 0x0A : 0x00;
+        }
+        else {
+            pc98_pal_analog[((i+8)*3) + 0] = 0x07;
+            pc98_pal_analog[((i+8)*3) + 1] = 0x07;
+            pc98_pal_analog[((i+8)*3) + 2] = 0x07;
+        }
+    }
+
+    pc98_update_palette();
+
+    /* Some PC-98 game behavior seems to suggest the BIOS data area stretches all the way from segment 0x40:0x00 to segment 0x7F:0x0F inclusive.
+     * Compare that to IBM PC platform, where segment fills only 0x40:0x00 to 0x50:0x00 inclusive and extra state is held in the "Extended BIOS Data Area".
+     */
+
+    /* number of text rows on the screen.
+     * Touhou Project will not clear/format the text layer properly without this variable. */
+    mem_writeb(0x710,25 - 1); /* cursor position Y coordinate */
+    mem_writeb(0x711,1); /* function definition display status flag */
+    mem_writeb(0x712,25 - 1); /* number of rows - 1 */
+    mem_writeb(0x713,1); /* normal 25 lines */
+    mem_writeb(0x714,0xE1); /* content erase attribute */
+
+    mem_writeb(0x719,0x20); /* content erase character */
+
+    mem_writeb(0x71B,0x01); /* cursor displayed */
+
+    mem_writeb(0x71D,0xE1); /* content display attribute */
+
+    mem_writeb(0x71F,0x01); /* scrolling speed is normal */
+
+    {
+        unsigned char r,g,b;
+
+        for (unsigned int i=0;i < 8;i++) {
+            r = (i & 2) ? 255 : 0;
+            g = (i & 4) ? 255 : 0;
+            b = (i & 1) ? 255 : 0;
+
+	        if (GFX_bpp >= 24) /* FIXME: Assumes 8:8:8. What happens when desktops start using the 10:10:10 format? */
+                pc98_text_palette[i] = (b << GFX_Bshift) | (g << GFX_Gshift) | (r << GFX_Rshift) | GFX_Amask;
+            else {
+                /* FIXME: PC-98 mode renders as 32bpp regardless (at this time), so we have to fake 32bpp order */
+                /*        Since PC-98 itself has 4-bit RGB precision, it might be best to offer a 16bpp rendering mode,
+                 *        or even just have PC-98 mode stay in 16bpp entirely. */
+                if (GFX_Bshift == 0)
+                    pc98_text_palette[i] = (b << 0U) | (g << 8U) | (r << 16U);
+                else
+                    pc98_text_palette[i] = (b << 16U) | (g << 8U) | (r << 0U);
+            }
+        }
+    }
+
+    pc98_gdc_tile_counter=0;
+    pc98_gdc_modereg=0;
+    for (unsigned int i=0;i < 4;i++) pc98_gdc_tiles[i].w = 0;
+
+    /* 200-line tradition on PC-98 seems to be to render only every other scanline */
+    pc98_graphics_hide_odd_raster_200line = true;
+
+    // as a transition to PC-98 GDC emulation, move VGA alphanumeric buffer
+    // down to A0000-AFFFFh.
+    gdc_analog = false;
+    pc98_gdc_vramop &= ~(1 << VOPBIT_ANALOG);
+    gfx(miscellaneous) &= ~0x0C; /* bits[3:2] = 0 to map A0000-BFFFF */
+    VGA_DetermineMode();
+    VGA_SetupHandlers();
+    INT10_PC98_CurMode_Relocate(); /* make sure INT 10h knows */
+
+    /* Set up 24KHz hsync 56.42Hz rate */
+    vga.crtc.horizontal_total = 106 - 5;
+    vga.crtc.vertical_total = (440 - 2) & 0xFF;
+    vga.crtc.end_vertical_blanking = (440 - 2 - 8) & 0xFF; // FIXME
+    vga.crtc.vertical_retrace_start = (440 - 2 - 30) & 0xFF; // FIXME
+    vga.crtc.vertical_retrace_end = (440 - 2 - 28) & 0xFF; // FIXME
+    vga.crtc.start_vertical_blanking = (400 + 8) & 0xFF; // FIXME
+    vga.crtc.overflow |=  0x01;
+    vga.crtc.overflow &= ~0x20;
+
+    /* 8-char wide mode. change to 25MHz clock to match. */
+	vga.config.addr_shift = 0;
+    seq(clocking_mode) |= 1; /* 8-bit wide char */
+	vga.misc_output &= ~0x0C; /* bits[3:2] = 0 25MHz clock */
+
+    /* PC-98 seems to favor a block cursor */
+    vga.draw.cursor.enabled = true;
+    crtc(cursor_start) = 0;
+    vga.draw.cursor.sline = 0;
+    crtc(cursor_end) = 15;
+    vga.draw.cursor.eline = 15;
+
+    /* now, switch to PC-98 video emulation */
+    for (unsigned int i=0;i < 16;i++) VGA_ATTR_SetPalette(i,i);
+    for (unsigned int i=0;i < 16;i++) {
+        /* GRB order palette */
+		vga.dac.rgb[i].red = (i & 2) ? 63 : 0;
+		vga.dac.rgb[i].green = (i & 4) ? 63 : 0;
+        vga.dac.rgb[i].blue = (i & 1) ? 63 : 0;
+        VGA_DAC_UpdateColor(i);
+    }
+    vga.mode=M_PC98;
+    assert(vga.vmemsize >= 0x80000);
+    memset(vga.mem.linear,0,0x80000);
+    for (unsigned int i=0x2000;i < 0x3fe0;i += 2) vga.mem.linear[i] = 0xE0; /* attribute GRBxxxxx = 11100000 (white) */
+
+    VGA_StartResize();
+}
+
+void MEM_ResetPageHandler_Unmapped(Bitu phys_page, Bitu pages);
+
+void PC98_FM_OnEnterPC98(Section *sec);
+
+void VGA_OnEnterPC98_phase2(Section *sec) {
+    VGA_SetupHandlers();
+
+    /* GDC 2.5/5.0MHz setting is also reflected in BIOS data area and DIP switch registers */
+    gdc_5mhz_mode_update_vars();
+
+    /* delay I/O port at 0x5F (0.6us) */
+    IO_RegisterWriteHandler(0x5F,pc98_wait_write,IO_MB);
+
+    /* master GDC at 0x60-0x6F (even)
+     * slave GDC at 0xA0-0xAF (even) */
+    for (unsigned int i=0x60;i <= 0xA0;i += 0x40) {
+        for (unsigned int j=0;j < 0x10;j += 2) {
+            IO_RegisterWriteHandler(i+j,pc98_gdc_write,IO_MB);
+            IO_RegisterReadHandler(i+j,pc98_gdc_read,IO_MB);
+        }
+    }
+
+    /* There are some font character RAM controls at 0xA1-0xA5 (odd)
+     * combined with A4000-A4FFF. Found by unknown I/O tracing in DOSBox-X
+     * and by tracing INT 18h AH=1Ah on an actual system using DEBUG.COM.
+     *
+     * If I find documentation on what exactly these ports are, I will
+     * list them as such.
+     *
+     * Some games (Touhou Project) load font RAM directly through these
+     * ports instead of using the BIOS. */
+    for (unsigned int i=0xA1;i <= 0xA9;i += 2) {
+        IO_RegisterWriteHandler(i,pc98_a1_write,IO_MB);
+    }
+    /* Touhou Project appears to read font RAM as well */
+    IO_RegisterReadHandler(0xA9,pc98_a1_read,IO_MB);
+
+    /* CRTC at 0x70-0x7F (even) */
+    for (unsigned int j=0x70;j < 0x80;j += 2) {
+        IO_RegisterWriteHandler(j,pc98_crtc_write,IO_MB);
+        IO_RegisterReadHandler(j,pc98_crtc_read,IO_MB);
+    }
+
+    /* EGC at 0x4A0-0x4AF (even).
+     * All I/O ports are 16-bit.
+     * NTS: On real hardware, doing 8-bit I/O on these ports will often hang the system. */
+    for (unsigned int i=0;i < 0x10;i += 2) {
+        IO_RegisterWriteHandler(i+0x4A0,pc98_egc4a0_write_warning,IO_MB);
+        IO_RegisterWriteHandler(i+0x4A0,pc98_egc4a0_write,        IO_MW);
+        IO_RegisterWriteHandler(i+0x4A1,pc98_egc4a0_write_warning,IO_MB);
+        IO_RegisterWriteHandler(i+0x4A1,pc98_egc4a0_write_warning,IO_MW);
+
+        IO_RegisterReadHandler(i+0x4A0,pc98_egc4a0_read_warning,IO_MB);
+        IO_RegisterReadHandler(i+0x4A0,pc98_egc4a0_read,        IO_MW);
+        IO_RegisterReadHandler(i+0x4A1,pc98_egc4a0_read_warning,IO_MB);
+        IO_RegisterReadHandler(i+0x4A1,pc98_egc4a0_read_warning,IO_MW);
+    }
+
+    pc98_gdc[GDC_MASTER].master_sync = true;
+    pc98_gdc[GDC_MASTER].display_enable = true;
+    pc98_gdc[GDC_MASTER].row_height = 16;
+    pc98_gdc[GDC_MASTER].active_display_words_per_line = 80;
+    pc98_gdc[GDC_MASTER].display_partition_mask = 3;
+
+    pc98_gdc[GDC_MASTER].force_fifo_complete();
+    pc98_gdc[GDC_MASTER].write_fifo_command(0x0F/*sync DE=1*/);
+    pc98_gdc[GDC_MASTER].write_fifo_param(0x10);
+    pc98_gdc[GDC_MASTER].write_fifo_param(0x4E);
+    pc98_gdc[GDC_MASTER].write_fifo_param(0x07);
+    pc98_gdc[GDC_MASTER].write_fifo_param(0x25);
+    pc98_gdc[GDC_MASTER].force_fifo_complete();
+    pc98_gdc[GDC_MASTER].write_fifo_param(0x07);
+    pc98_gdc[GDC_MASTER].write_fifo_param(0x07);
+    pc98_gdc[GDC_MASTER].write_fifo_param(0x90);
+    pc98_gdc[GDC_MASTER].write_fifo_param(0x65);
+    pc98_gdc[GDC_MASTER].force_fifo_complete();
+
+    pc98_gdc[GDC_SLAVE].master_sync = false;
+    pc98_gdc[GDC_SLAVE].display_enable = false;//FIXME
+    pc98_gdc[GDC_SLAVE].row_height = 1;
+    pc98_gdc[GDC_SLAVE].active_display_words_per_line = 40; /* 40 16-bit WORDs per line */
+    pc98_gdc[GDC_SLAVE].display_partition_mask = pc98_allow_4_display_partitions ? 3 : 1;
+
+    pc98_gdc[GDC_SLAVE].force_fifo_complete();
+    pc98_gdc[GDC_SLAVE].write_fifo_command(0x0F/*sync DE=1*/);
+    pc98_gdc[GDC_SLAVE].write_fifo_param(0x02);
+    pc98_gdc[GDC_SLAVE].write_fifo_param(0x26);
+    pc98_gdc[GDC_SLAVE].write_fifo_param(0x03);
+    pc98_gdc[GDC_SLAVE].write_fifo_param(0x11);
+    pc98_gdc[GDC_SLAVE].force_fifo_complete();
+    pc98_gdc[GDC_SLAVE].write_fifo_param(0x83);
+    pc98_gdc[GDC_SLAVE].write_fifo_param(0x07);
+    pc98_gdc[GDC_SLAVE].write_fifo_param(0x90);
+    pc98_gdc[GDC_SLAVE].write_fifo_param(0x65);
+    pc98_gdc[GDC_SLAVE].force_fifo_complete();
+
+    VGA_StartResize();
+
+    void update_pc98_function_row(bool enable);
+    update_pc98_function_row(true);
+}
+
+void VGA_Init() {
+	string str;
 	Bitu i,j;
+
+    vga.draw.render_step = 0;
+    vga.draw.render_max = 1;
+
+	vga.tandy.draw_base = NULL;
+	vga.tandy.mem_base = NULL;
+    vga.vmemsize_alloced = 0;
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing VGA");
+
+	VGA_TweakUserVsyncOffset(0.0f);
+
 	for (i=0;i<256;i++) {
 		ExpandTable[i]=i | (i << 8)| (i <<16) | (i << 24);
 	}
@@ -612,8 +1028,12 @@ void VGA_Init(Section* sec) {
 		}
 	}
 
-	if (machine == MCH_CGA) PROGRAMS_MakeFile("CGASNOW.COM",CGASNOW_ProgramStart);
-	PROGRAMS_MakeFile("VFRCRATE.COM",VFRCRATE_ProgramStart);
+	AddVMEventFunction(VM_EVENT_RESET,AddVMEventFunctionFuncPair(VGA_Reset));
+	AddVMEventFunction(VM_EVENT_ENTER_PC98_MODE,AddVMEventFunctionFuncPair(VGA_OnEnterPC98));
+	AddVMEventFunction(VM_EVENT_ENTER_PC98_MODE_END,AddVMEventFunctionFuncPair(VGA_OnEnterPC98_phase2));
+
+    // TODO: Move to separate file
+	AddVMEventFunction(VM_EVENT_ENTER_PC98_MODE_END,AddVMEventFunctionFuncPair(PC98_FM_OnEnterPC98));
 }
 
 void SVGA_Setup_Driver(void) {
@@ -637,528 +1057,3 @@ void SVGA_Setup_Driver(void) {
 		break;
 	}
 }
-
-
-//save state support
-void *VGA_SetupDrawing_PIC_Event = (void*)VGA_SetupDrawing;
-
-extern void POD_Save_VGA_Draw( std::ostream & );
-extern void POD_Save_VGA_Seq( std::ostream & );
-extern void POD_Save_VGA_Attr( std::ostream & );
-extern void POD_Save_VGA_Crtc( std::ostream & );
-extern void POD_Save_VGA_Gfx( std::ostream & );
-extern void POD_Save_VGA_Dac( std::ostream & );
-extern void POD_Save_VGA_S3( std::ostream & );
-extern void POD_Save_VGA_Other( std::ostream & );
-extern void POD_Save_VGA_Memory( std::ostream & );
-extern void POD_Save_VGA_Paradise( std::ostream & );
-extern void POD_Save_VGA_Tseng( std::ostream & );
-extern void POD_Save_VGA_XGA( std::ostream & );
-extern void POD_Load_VGA_Draw( std::istream & );
-extern void POD_Load_VGA_Seq( std::istream & );
-extern void POD_Load_VGA_Attr( std::istream & );
-extern void POD_Load_VGA_Crtc( std::istream & );
-extern void POD_Load_VGA_Gfx( std::istream & );
-extern void POD_Load_VGA_Dac( std::istream & );
-extern void POD_Load_VGA_S3( std::istream & );
-extern void POD_Load_VGA_Other( std::istream & );
-extern void POD_Load_VGA_Memory( std::istream & );
-extern void POD_Load_VGA_Paradise( std::istream & );
-extern void POD_Load_VGA_Tseng( std::istream & );
-extern void POD_Load_VGA_XGA( std::istream & );
-
-namespace {
-class SerializeVga : public SerializeGlobalPOD {
-public:
-	SerializeVga() : SerializeGlobalPOD("Vga")
-	{}
-
-private:
-	virtual void getBytes(std::ostream& stream)
-	{
-		Bit32u tandy_drawbase_idx, tandy_membase_idx;
-
-
-		if( vga.tandy.draw_base == vga.mem.linear ) tandy_drawbase_idx=0xffffffff;
-		else tandy_drawbase_idx = vga.tandy.draw_base - MemBase;
-
-		if( vga.tandy.mem_base == vga.mem.linear ) tandy_membase_idx=0xffffffff;
-		else tandy_membase_idx = vga.tandy.mem_base - MemBase;
-
-		//********************************
-		//********************************
-
-		SerializeGlobalPOD::getBytes(stream);
-
-
-		// - pure data
-		WRITE_POD( &vga.mode, vga.mode );
-		WRITE_POD( &vga.lastmode, vga.lastmode );
-		WRITE_POD( &vga.misc_output, vga.misc_output );
-
-		
-		// VGA_Draw.cpp
-		POD_Save_VGA_Draw(stream);
-
-
-		// - pure struct data
-		WRITE_POD( &vga.config, vga.config );
-		WRITE_POD( &vga.internal, vga.internal );
-
-
-		// VGA_Seq.cpp / VGA_Attr.cpp / (..)
-		POD_Save_VGA_Seq(stream);
-		POD_Save_VGA_Attr(stream);
-		POD_Save_VGA_Crtc(stream);
-		POD_Save_VGA_Gfx(stream);
-		POD_Save_VGA_Dac(stream);
-
-
-		// - pure data
-		WRITE_POD( &vga.latch, vga.latch );
-
-
-		// VGA_S3.cpp
-		POD_Save_VGA_S3(stream);
-
-
-		// - pure struct data
-		WRITE_POD( &vga.svga, vga.svga );
-		WRITE_POD( &vga.herc, vga.herc );
-
-
-		// - near-pure struct data
-		WRITE_POD( &vga.tandy, vga.tandy );
-
-		// - reloc data
-		WRITE_POD( &tandy_drawbase_idx, tandy_drawbase_idx );
-		WRITE_POD( &tandy_membase_idx, tandy_membase_idx );
-
-
-		// - pure struct data
-		WRITE_POD( &vga.amstrad, vga.amstrad );
-
-
-		// vga_other.cpp / vga_memory.cpp
-		POD_Save_VGA_Other(stream);
-		POD_Save_VGA_Memory(stream);
-
-
-		// - pure data
-		WRITE_POD( &vga.vmemwrap, vga.vmemwrap );
-
-
-		// - static ptrs + 'new' data
-		//Bit8u* fastmem;
-		//Bit8u* fastmem_orgptr;
-
-		// - 'new' data
-		//WRITE_POD_SIZE( vga.fastmem_orgptr, sizeof(Bit8u) * ((vga.vmemsize << 1) + 4096 + 16) );
-
-
-		// - pure data (variable on S3 card)
-		WRITE_POD( &vga.vmemsize, vga.vmemsize );
-
-
-#ifdef VGA_KEEP_CHANGES
-		// - static ptr
-		//Bit8u* map;
-
-		// - 'new' data
-		WRITE_POD_SIZE( vga.changes.map, sizeof(Bit8u) * (VGA_MEMORY >> VGA_CHANGE_SHIFT) + 32 );
-
-
-		// - pure data
-		WRITE_POD( &vga.changes.checkMask, vga.changes.checkMask );
-		WRITE_POD( &vga.changes.frame, vga.changes.frame );
-		WRITE_POD( &vga.changes.writeMask, vga.changes.writeMask );
-		WRITE_POD( &vga.changes.active, vga.changes.active );
-		WRITE_POD( &vga.changes.clearMask, vga.changes.clearMask );
-		WRITE_POD( &vga.changes.start, vga.changes.start );
-		WRITE_POD( &vga.changes.last, vga.changes.last );
-		WRITE_POD( &vga.changes.lastAddress, vga.changes.lastAddress );
-#endif
-
-
-		// - pure data
-		WRITE_POD( &vga.lfb.page, vga.lfb.page );
-		WRITE_POD( &vga.lfb.addr, vga.lfb.addr );
-		WRITE_POD( &vga.lfb.mask, vga.lfb.mask );
-
-		// - static ptr
-		//PageHandler *handler;
-
-
-		// VGA_paradise.cpp / VGA_tseng.cpp / VGA_xga.cpp
-		POD_Save_VGA_Paradise(stream);
-		POD_Save_VGA_Tseng(stream);
-		POD_Save_VGA_XGA(stream);
-	}
-
-	virtual void setBytes(std::istream& stream)
-	{
-		Bit32u tandy_drawbase_idx, tandy_membase_idx;
-
-		//********************************
-		//********************************
-
-		SerializeGlobalPOD::setBytes(stream);
-
-
-		// - pure data
-		READ_POD( &vga.mode, vga.mode );
-		READ_POD( &vga.lastmode, vga.lastmode );
-		READ_POD( &vga.misc_output, vga.misc_output );
-
-		
-		// VGA_Draw.cpp
-		POD_Load_VGA_Draw(stream);
-
-
-		// - pure struct data
-		READ_POD( &vga.config, vga.config );
-		READ_POD( &vga.internal, vga.internal );
-
-
-		// VGA_Seq.cpp / VGA_Attr.cpp / (..)
-		POD_Load_VGA_Seq(stream);
-		POD_Load_VGA_Attr(stream);
-		POD_Load_VGA_Crtc(stream);
-		POD_Load_VGA_Gfx(stream);
-		POD_Load_VGA_Dac(stream);
-
-
-		// - pure data
-		READ_POD( &vga.latch, vga.latch );
-
-
-		// VGA_S3.cpp
-		POD_Load_VGA_S3(stream);
-
-
-		// - pure struct data
-		READ_POD( &vga.svga, vga.svga );
-		READ_POD( &vga.herc, vga.herc );
-
-
-		// - near-pure struct data
-		READ_POD( &vga.tandy, vga.tandy );
-
-		// - reloc data
-		READ_POD( &tandy_drawbase_idx, tandy_drawbase_idx );
-		READ_POD( &tandy_membase_idx, tandy_membase_idx );
-
-
-		// - pure struct data
-		READ_POD( &vga.amstrad, vga.amstrad );
-
-
-		// vga_other.cpp / vga_memory.cpp
-		POD_Load_VGA_Other(stream);
-		POD_Load_VGA_Memory(stream);
-
-
-		// - pure data
-		READ_POD( &vga.vmemwrap, vga.vmemwrap );
-
-
-		// - static ptrs + 'new' data
-		//Bit8u* fastmem;
-		//Bit8u* fastmem_orgptr;
-
-		// - 'new' data
-		//READ_POD_SIZE( vga.fastmem_orgptr, sizeof(Bit8u) * ((vga.vmemsize << 1) + 4096 + 16) );
-
-
-		// - pure data (variable on S3 card)
-		READ_POD( &vga.vmemsize, vga.vmemsize );
-
-
-#ifdef VGA_KEEP_CHANGES
-		// - static ptr
-		//Bit8u* map;
-
-		// - 'new' data
-		READ_POD_SIZE( vga.changes.map, sizeof(Bit8u) * (VGA_MEMORY >> VGA_CHANGE_SHIFT) + 32 );
-
-
-		// - pure data
-		READ_POD( &vga.changes.checkMask, vga.changes.checkMask );
-		READ_POD( &vga.changes.frame, vga.changes.frame );
-		READ_POD( &vga.changes.writeMask, vga.changes.writeMask );
-		READ_POD( &vga.changes.active, vga.changes.active );
-		READ_POD( &vga.changes.clearMask, vga.changes.clearMask );
-		READ_POD( &vga.changes.start, vga.changes.start );
-		READ_POD( &vga.changes.last, vga.changes.last );
-		READ_POD( &vga.changes.lastAddress, vga.changes.lastAddress );
-#endif
-
-
-		// - pure data
-		READ_POD( &vga.lfb.page, vga.lfb.page );
-		READ_POD( &vga.lfb.addr, vga.lfb.addr );
-		READ_POD( &vga.lfb.mask, vga.lfb.mask );
-
-		// - static ptr
-		//PageHandler *handler;
-
-
-		// VGA_paradise.cpp / VGA_tseng.cpp / VGA_xga.cpp
-		POD_Load_VGA_Paradise(stream);
-		POD_Load_VGA_Tseng(stream);
-		POD_Load_VGA_XGA(stream);
-
-		//********************************
-		//********************************
-
-		if( tandy_drawbase_idx == 0xffffffff ) vga.tandy.draw_base = vga.mem.linear;
-		else vga.tandy.draw_base = MemBase + tandy_drawbase_idx;
-
-		if( tandy_membase_idx == 0xffffffff ) vga.tandy.mem_base = vga.mem.linear;
-		else vga.tandy.mem_base = MemBase + tandy_membase_idx;
-	}
-} dummy;
-}
-
-
-
-/*
-ykhwong svn-daum 2012-02-20
-
-
-static globals:
-
-struct VGA_Type vga:
-
-// - pure data
-- VGAModes mode;
-- VGAModes lastmode;
-- Bit8u misc_output;
-
-// - pure + reloc data
-- VGA_Draw draw;
-- VGA_Config config;
-- VGA_Internal internal;
-- VGA_Seq seq;
-- VGA_Attr attr;
-- VGA_Crtc crtc;
-- VGA_Gfx gfx;
-- VGA_Dac dac;
-- VGA_Latch latch;
-- VGA_S3 s3;
-- VGA_SVGA svga;
-- VGA_HERC herc;
-- VGA_TANDY tandy;
-- VGA_AMSTRAD amstrad;
-- VGA_OTHER other;
-- VGA_Memory mem;
-- Bit32u vmemwrap;
-
-
-// - static ptrs + 'new' data
-- Bit8u* fastmem;
-- Bit8u* fastmem_orgptr;
-
-
-// - pure data
-- Bit32u vmemsize;
-
-
-#ifdef VGA_KEEP_CHANGES
-- VGA_Changes changes;
-#endif
-
-
-- VGA_LFB lfb;
-
-
-
-
-// - static class
-struct SVGA_Driver svga:
-
-// - static function ptr (init time)
-- tWritePort write_p3d5;
-- tReadPort read_p3d5;
-- tWritePort write_p3c5;
-- tReadPort read_p3c5;
-- tWritePort write_p3c0;
-- tReadPort read_p3c1;
-- tWritePort write_p3cf;
-- tReadPort read_p3cf;
-- tFinishSetMode set_video_mode;
-- tDetermineMode determine_mode;
-- tSetClock set_clock;
-- tGetClock get_clock;
-- tHWCursorActive hardware_cursor_active;
-- tAcceptsMode accepts_mode;
-- tSetupDAC setup_dac;
-- tINT10Extensions int10_extensions;
-
-
-// - static data
-Bit32u CGA_2_Table[16];
-Bit32u CGA_4_Table[256];
-Bit32u CGA_4_HiRes_Table[256];
-Bit32u CGA_16_Table[256];
-Bit32u TXT_Font_Table[16];
-Bit32u TXT_FG_Table[16];
-Bit32u TXT_BG_Table[16];
-Bit32u ExpandTable[256];
-Bit32u Expand16Table[4][16];
-Bit32u FillTable[16];
-Bit32u ColorTable[16];
-
-
-// - pure data
-static bool hadReset;
-
-// =============================================
-// =============================================
-// =============================================
-
-struct VGA_Config:
-
-// - (all) pure data
-- Bitu mh_mask;
-
-- Bitu display_start;
-- Bitu real_start;
-- bool retrace;
-- Bitu scan_len;
-- Bitu cursor_start;
-
-- Bitu line_compare;
-- bool chained;
-- bool compatible_chain4;
-
-- Bit8u pel_panning;
-- Bit8u hlines_skip;
-- Bit8u bytes_skip;
-- Bit8u addr_shift;
-
-- Bit8u read_mode;
-- Bit8u write_mode;
-- Bit8u read_map_select;
-- Bit8u color_dont_care;
-- Bit8u color_compare;
-- Bit8u data_rotate;
-- Bit8u raster_op;
-
-- Bit32u full_bit_mask;
-- Bit32u full_map_mask;
-- Bit32u full_not_map_mask;
-- Bit32u full_set_reset;
-- Bit32u full_not_enable_set_reset;
-- Bit32u full_enable_set_reset;
-- Bit32u full_enable_and_set_reset;
-
-// =============================================
-// =============================================
-// =============================================
-
-struct VGA_Internal:
-
-// - pure data
-- bool attrindex;
-
-
-// =============================================
-// =============================================
-// =============================================
-
-struct VGA_Latch:
-
-// - pure data
-- Bit32u d;
-- Bit8u b[4];
-
-// =============================================
-// =============================================
-// =============================================
-
-struct VGA_SVGA:
-
-// - pure data
-- Bitu	readStart, writeStart;
-- Bitu	bankMask;
-- Bitu	bank_read_full;
-- Bitu	bank_write_full;
-- Bit8u	bank_read;
-- Bit8u	bank_write;
-- Bitu	bank_size;
-
-
-
-struct VGA_HERC:
-
-// - pure data
-- Bit8u mode_control;
-- Bit8u enable_bits;
-- bool blend;
-
-
-
-struct VGA_TANDY:
-
-// - pure data
-- Bit8u pcjr_flipflop;
-- Bit8u mode_control;
-- Bit8u color_select;
-- Bit8u disp_bank;
-- Bit8u reg_index;
-- Bit8u gfx_control;
-- Bit8u palette_mask;
-- Bit8u extended_ram;
-- Bit8u border_color;
-- Bit8u line_mask, line_shift;
-- Bit8u draw_bank, mem_bank;
-
-// - reloc ptrs
-- Bit8u *draw_base, *mem_base;
-
-// - pure data
-- Bitu addr_mask;
-
-
-
-struct VGA_AMSTRAD:
-
-// - pure data
-- Bit8u mask_plane;
-- Bit8u write_plane;
-- Bit8u read_plane;
-- Bit8u border_color;
-
-// =============================================
-// =============================================
-// =============================================
-
-struct VGA_Changes:
-
-// - static ptr + 'new' data
-- Bit8u* map; //[(VGA_MEMORY >> VGA_CHANGE_SHIFT) + 32]
-
-
-// - pure data
-- Bit8u	checkMask, frame, writeMask;
-- bool active;
-- Bit32u clearMask;
-- Bit32u start, last;
-- Bit32u lastAddress;
-
-// =============================================
-// =============================================
-// =============================================
-
-struct VGA_LFB:
-
-// - pure data
-- Bit32u page;
-- Bit32u addr;
-- Bit32u mask;
-
-
-// - static ptr
-- PageHandler *handler;
-*/

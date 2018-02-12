@@ -30,6 +30,10 @@
 #include "paging.h"
 #include "mmx.h"
 
+#define CPU_CORE CPU_ARCHTYPE_386
+
+#define DoString DoString_Prefetch
+
 extern bool ignore_opcode_63;
 
 #if C_DEBUG
@@ -213,6 +217,9 @@ static Bit32u Fetchd() {
 
 #define EALookupTable (core.ea_table)
 
+extern Bitu dosbox_check_nonrecursive_pf_cs;
+extern Bitu dosbox_check_nonrecursive_pf_eip;
+
 Bits CPU_Core_Prefetch_Run(void) {
 	bool invalidate_pq=false;
 	while (CPU_Cycles-->0) {
@@ -221,6 +228,8 @@ Bits CPU_Core_Prefetch_Run(void) {
 			invalidate_pq=false;
 		}
 		LOADIP;
+		dosbox_check_nonrecursive_pf_cs = SegValue(cs);
+		dosbox_check_nonrecursive_pf_eip = reg_eip;
 		core.opcode_index=cpu.code.big*0x200;
 		core.prefixes=cpu.code.big;
 		core.ea_table=&EATable[cpu.code.big*256];
@@ -273,7 +282,7 @@ restart_opcode:
 		#include "core_normal/prefix_66_0f.h"
 		default:
 		illegal_opcode:
-#if C_DEBUG	
+#if C_DEBUG
 			{
 				bool ignore=false;
 				Bitu len=(GETIP-reg_eip);
@@ -287,11 +296,14 @@ restart_opcode:
 					writecode+=2;
 				}
 				if (!ignore)
-				LOG(LOG_CPU,LOG_NORMAL)("Illegal/Unhandled opcode %s",tempcode);
+					LOG(LOG_CPU,LOG_NORMAL)("Illegal/Unhandled opcode %s",tempcode);
 			}
 #endif
 			CPU_Exception(6,0);
 			invalidate_pq=true;
+			continue;
+		gp_fault:
+			CPU_Exception(EXCEPTION_GP,0);
 			continue;
 		}
 		SAVEIP;

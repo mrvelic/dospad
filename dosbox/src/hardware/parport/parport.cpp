@@ -15,6 +15,7 @@
  *  along with this program; if not, write to the Free Software
  *  Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  */
+/* FIXME: At some point I would like to roll the Disney Sound Source emulation into this code */
 
 #include <string.h>
 #include <ctype.h>
@@ -126,7 +127,7 @@ static Bitu PARALLEL_Read (Bitu port, Bitu iolen) {
 }
 
 static void PARALLEL_Write (Bitu port, Bitu val, Bitu) {
-	for(Bitu i = 0; i < 4; i++) {
+	for(Bitu i = 0; i < 3; i++) {
 		if(parallel_baseaddr[i]==(port&0xfffc) && parallelPortObjects[i]) {
 #if PARALLEL_DEBUG
 			const char* const dbgtext[]={"DAT","IOS","CON","???"};
@@ -209,7 +210,7 @@ CParallel::CParallel(CommandLine* cmd, Bitu portnr, Bit8u initirq) {
 			portnr+1,base,cleft.c_str());
 	}
 #endif
-	LOG_MSG("Parallel%d: BASE %xh",portnr+1,base);
+	LOG_MSG("Parallel%d: BASE %xh",(int)portnr+1,(int)base);
 
 	for (Bitu i = 0; i < 3; i++) {
 		/* bugfix: do not register I/O write handler for the status port. it's a *status* port.
@@ -218,19 +219,28 @@ CParallel::CParallel(CommandLine* cmd, Bitu portnr, Bit8u initirq) {
 		if (i != 1) WriteHandler[i].Install (i + base, PARALLEL_Write, IO_MB);
 		ReadHandler[i].Install (i + base, PARALLEL_Read, IO_MB);
 	}
-	BIOS_SetLPTPort(portnr,base);
-	mydosdevice=new device_LPT(portnr, this);
-	DOS_AddDevice(mydosdevice);
+
+	mydosdevice = NULL;
 };
 
-CParallel::~CParallel(void) {
-//	LOG_MSG("~CParallel mydosdevice=%p\n",(void*)mydosdevice);
-	BIOS_SetLPTPort(port_nr,0);
+void CParallel::registerDOSDevice() {
+	if (mydosdevice == NULL) {
+		LOG(LOG_MISC,LOG_DEBUG)("LPT%d: Registering DOS device",(int)port_nr+1);
+		mydosdevice = new device_LPT(port_nr, this);
+		DOS_AddDevice(mydosdevice);
+	}
+}
+
+void CParallel::unregisterDOSDevice() {
 	if (mydosdevice != NULL) {
-//		LOG_MSG("~CParallel DOS_Device free\n");
-		DOS_DelDevice(mydosdevice);
+		LOG(LOG_MISC,LOG_DEBUG)("LPT%d: Unregistering DOS device",(int)port_nr+1);
+		DOS_DelDevice(mydosdevice); // deletes the pointer for us!
 		mydosdevice=NULL;
 	}
+}
+
+CParallel::~CParallel(void) {
+	unregisterDOSDevice();
 };
 
 Bit8u CParallel::getPrinterStatus()
@@ -272,14 +282,42 @@ void CParallel::initialize()
 
 
 CParallel* parallelPortObjects[3]={NULL,NULL,NULL};
+
+bool DISNEY_HasInit();
+Bitu DISNEY_BasePort();
+bool DISNEY_ShouldInit();
+void DISNEY_Init(unsigned int base_port);
+
+Bitu bios_post_parport_count() {
+	Bitu count = 0;
+	unsigned int i;
+
+	for (i=0;i < 3;i++) {
+		if (parallelPortObjects[i] != NULL)
+			count++;
+		else if (DISNEY_HasInit() && parallel_baseaddr[i] == DISNEY_BasePort())
+			count++;
+	}
+
+	return count;
+}
+
+/* at BIOS POST stage, write parallel ports to bios data area */
+void BIOS_Post_register_parports() {
+	unsigned int i;
+
+	for (i=0;i < 3;i++) {
+		if (parallelPortObjects[i] != NULL)
+			BIOS_SetLPTPort(i,parallelPortObjects[i]->base);
+		else if (DISNEY_HasInit() && parallel_baseaddr[i] == DISNEY_BasePort())
+			BIOS_SetLPTPort(i,DISNEY_BasePort());
+	}
+}
+	
 class PARPORTS:public Module_base {
 public:
 	
 	PARPORTS (Section * configuration):Module_base (configuration) {
-
-#if C_PRINTER
-		bool printer_used = false;
-#endif
 
 		// default ports & interrupts
 		Bit8u defaultirq[] = { 7, 5, 12};
@@ -315,26 +353,18 @@ public:
 				}
 			}
 			else 
-#if C_PRINTER
-			if(str=="printer") {
-				if(printer_used) {
-					
-				}; // only one parallel port with printer
-				CPrinterRedir* cprd = new CPrinterRedir(i,defaultirq[i],&cmd);
-				if(cprd->InstallationSuccessful) {
-					parallelPortObjects[i]=cprd;
-					printer_used=true;
-				} else {
-					LOG_MSG("Error: printer is not enabled.");
-					delete cprd;
-					parallelPortObjects[i]=0;
-				}
-			} else
-#endif				
 			if(str=="disabled") {
 				parallelPortObjects[i] = 0;
+			} else if (str == "disney") {
+				if (!DISNEY_HasInit()) {
+					LOG_MSG("LPT%d: User explicitly assigned Disney Sound Source to this port",(int)i+1);
+					DISNEY_Init(parallel_baseaddr[i]);
+				}
+				else {
+					LOG_MSG("LPT%d: Disney Sound Source already initialized on a port, cannot init again",(int)i+1);
+				}
 			} else {
-				LOG_MSG ("Invalid type for LPT%d.", i + 1);
+				LOG_MSG ("Invalid type for LPT%d.",(int)i + 1);
 				parallelPortObjects[i] = 0;
 			}
 		} // for lpt 1-3
@@ -354,13 +384,81 @@ public:
 static PARPORTS *testParallelPortsBaseclass = NULL;
 
 void PARALLEL_Destroy (Section * sec) {
-	delete testParallelPortsBaseclass;
-	testParallelPortsBaseclass = NULL;
+	if (testParallelPortsBaseclass != NULL) {
+		delete testParallelPortsBaseclass;
+		testParallelPortsBaseclass = NULL;
+	}
 }
 
-void PARALLEL_Init (Section * sec) {
-	// should never happen
+void PARALLEL_OnPowerOn (Section * sec) {
+	LOG(LOG_MISC,LOG_DEBUG)("Reinitializing parallel port emulation");
+
 	if (testParallelPortsBaseclass) delete testParallelPortsBaseclass;
-	testParallelPortsBaseclass = new PARPORTS (sec);
-	sec->AddDestroyFunction (&PARALLEL_Destroy, true);
+	testParallelPortsBaseclass = new PARPORTS (control->GetSection("parallel"));
+
+	/* Mainline DOSBox 0.74 compatible support for "disney=true" setting.
+	 * But, don't allocate the Disney Sound Source if LPT1 is already taken. */
+	if (!DISNEY_HasInit() && DISNEY_ShouldInit() && parallelPortObjects[0] == NULL) {
+		LOG_MSG("LPT: LPT1 not taken, and dosbox.conf says to emulate Disney Sound Source");
+		DISNEY_Init(parallel_baseaddr[0]);
+	}
 }
+
+void PARALLEL_OnDOSKernelInit (Section * sec) {
+	unsigned int i;
+
+	LOG(LOG_MISC,LOG_DEBUG)("DOS kernel initializing, creating LPTx devices");
+
+	for (i=0;i < 3;i++) {
+		if (parallelPortObjects[i] != NULL)
+			parallelPortObjects[i]->registerDOSDevice();
+	}
+}
+
+void PARALLEL_OnDOSKernelExit (Section * sec) {
+	unsigned int i;
+
+	for (i=0;i < 3;i++) {
+		if (parallelPortObjects[i] != NULL)
+			parallelPortObjects[i]->unregisterDOSDevice();
+	}
+}
+
+void PARALLEL_OnReset (Section * sec) {
+	unsigned int i;
+
+	// FIXME: Unregister/destroy the DOS devices, but consider that the DOS kernel at reset is gone.
+	for (i=0;i < 3;i++) {
+		if (parallelPortObjects[i] != NULL)
+			parallelPortObjects[i]->unregisterDOSDevice();
+	}
+}
+
+void PARALLEL_OnPC98Enter (Section * sec) {
+    /* TODO: PC-98 systems do have parallel ports.
+     *       Update this code to match when I figure out how they work and what I/O ports are involved. */
+    unsigned int i;
+
+    for (i=0;i < 3;i++) {
+        if (parallelPortObjects[i] != NULL)
+            parallelPortObjects[i]->unregisterDOSDevice();
+    }
+
+    if (testParallelPortsBaseclass != NULL) {
+        delete testParallelPortsBaseclass;
+        testParallelPortsBaseclass = NULL;
+    }
+}
+
+void PARALLEL_Init () {
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing parallel port emulation");
+
+	AddExitFunction(AddExitFunctionFuncPair(PARALLEL_Destroy),true);
+	AddVMEventFunction(VM_EVENT_RESET,AddVMEventFunctionFuncPair(PARALLEL_OnReset));
+	AddVMEventFunction(VM_EVENT_POWERON,AddVMEventFunctionFuncPair(PARALLEL_OnPowerOn));
+	AddVMEventFunction(VM_EVENT_DOS_EXIT_BEGIN,AddVMEventFunctionFuncPair(PARALLEL_OnDOSKernelExit));
+	AddVMEventFunction(VM_EVENT_DOS_INIT_KERNEL_READY,AddVMEventFunctionFuncPair(PARALLEL_OnDOSKernelInit));
+
+	AddVMEventFunction(VM_EVENT_ENTER_PC98_MODE,AddVMEventFunctionFuncPair(PARALLEL_OnPC98Enter));
+}
+

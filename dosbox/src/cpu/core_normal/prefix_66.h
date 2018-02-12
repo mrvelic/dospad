@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2002-2015  The DOSBox Team
+ *  Copyright (C) 2002-2013  The DOSBox Team
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -147,15 +147,32 @@
 	CASE_D(0x5f)												/* POP EDI */
 		reg_edi=Pop_32();break;
 	CASE_D(0x60)												/* PUSHAD */
-	{
-		Bitu tmpesp = reg_esp;
-		Push_32(reg_eax);Push_32(reg_ecx);Push_32(reg_edx);Push_32(reg_ebx);
-		Push_32(tmpesp);Push_32(reg_ebp);Push_32(reg_esi);Push_32(reg_edi);
-	}; break;
+		{
+			Bitu old_esp = reg_esp;
+			try {
+				Bitu tmpesp = reg_esp;
+				Push_32(reg_eax);Push_32(reg_ecx);Push_32(reg_edx);Push_32(reg_ebx);
+				Push_32(tmpesp);Push_32(reg_ebp);Push_32(reg_esi);Push_32(reg_edi);
+			}
+			catch (GuestPageFaultException &pf) {
+				LOG_MSG("PUSHAD interrupted by page fault");
+				reg_esp = old_esp;
+				throw;
+			}
+		} break;
 	CASE_D(0x61)												/* POPAD */
-		reg_edi=Pop_32();reg_esi=Pop_32();reg_ebp=Pop_32();Pop_32();//Don't save ESP
-		reg_ebx=Pop_32();reg_edx=Pop_32();reg_ecx=Pop_32();reg_eax=Pop_32();
-		break;
+		{
+			Bitu old_esp = reg_esp;
+			try {
+				reg_edi=Pop_32();reg_esi=Pop_32();reg_ebp=Pop_32();Pop_32();//Don't save ESP
+				reg_ebx=Pop_32();reg_edx=Pop_32();reg_ecx=Pop_32();reg_eax=Pop_32();
+			}
+			catch (GuestPageFaultException &pf) {
+				LOG_MSG("POPAD interrupted by page fault");
+				reg_esp = old_esp;
+				throw;
+			}
+		} break;
 	CASE_D(0x62)												/* BOUND Ed */
 		{
 			Bit32s bound_min, bound_max;
@@ -351,12 +368,19 @@
 		}
 	CASE_D(0x8f)												/* POP Ed */
 		{
-			Bit32u val=Pop_32();
-			GetRM;
-			if (rm >= 0xc0 ) {GetEArd;*eard=val;}
-			else {GetEAa;SaveMd(eaa,val);}
-			break;
-		}
+			Bit32u old_esp = reg_esp;
+
+			try {
+				Bit32u val=Pop_32();
+				GetRM;
+				if (rm >= 0xc0 ) {GetEArd;*eard=val;}
+				else {GetEAa;SaveMd(eaa,val);}
+			}
+			catch (GuestPageFaultException &pf) {
+				reg_esp = old_esp;
+				throw;
+			}
+		} break;
 	CASE_D(0x91)												/* XCHG ECX,EAX */
 		{ Bit32u temp=reg_eax;reg_eax=reg_ecx;reg_ecx=temp;break;}
 	CASE_D(0x92)												/* XCHG EDX,EAX */
@@ -412,14 +436,15 @@
 #endif
 		break;
 	CASE_D(0xa1)												/* MOV EAX,Od */
-		{
-			GetEADirect;
+		{ /* NTS: GetEADirect may jump instead to the GP# trigger code if the offset exceeds the segment limit.
+		          For whatever reason, NOT signalling GP# in that condition prevents Windows 95 OSR2 from starting a DOS VM. Weird. */
+			GetEADirect(4);
 			reg_eax=LoadMd(eaa);
 		}
 		break;
 	CASE_D(0xa3)												/* MOV Od,EAX */
 		{
-			GetEADirect;
+			GetEADirect(4);
 			SaveMd(eaa,reg_eax);
 		}
 		break;
@@ -454,9 +479,20 @@
 	CASE_D(0xc1)												/* GRP2 Ed,Ib */
 		GRP2D(Fetchb());break;
 	CASE_D(0xc2)												/* RETN Iw */
-		reg_eip=Pop_32();
-		reg_esp+=Fetchw();
-		continue;
+		{
+			Bit32u old_esp = reg_esp;
+
+			try {
+				/* this is structured either to complete RET or leave registers unmodified if interrupted by page fault */
+				Bit32u new_eip = Pop_32();
+				reg_esp += Fetchw();
+				reg_eip = new_eip;
+			}
+			catch (GuestPageFaultException &pf) {
+				reg_esp = old_esp; /* restore stack pointer */
+				throw;
+			}
+		} continue;
 	CASE_D(0xc3)												/* RETN */
 		reg_eip=Pop_32();
 		continue;
@@ -493,10 +529,19 @@
 		}
 		break;
 	CASE_D(0xc9)												/* LEAVE */
-		reg_esp&=cpu.stack.notmask;
-		reg_esp|=(reg_ebp&cpu.stack.mask);
-		reg_ebp=Pop_32();
-		break;
+		{
+			Bit32u old_esp = reg_esp;
+
+			reg_esp &= cpu.stack.notmask;
+			reg_esp |= reg_ebp&cpu.stack.mask;
+			try {
+				reg_ebp = Pop_32();
+			}
+			catch (GuestPageFaultException &pf) {
+				reg_esp = old_esp;
+				throw;
+			}
+		} break;
 	CASE_D(0xca)												/* RETF Iw */
 		{ 
 			Bitu words=Fetchw();
@@ -568,10 +613,12 @@
 		}
 	CASE_D(0xe8)												/* CALL Jd */
 		{ 
+			/* must not adjust (E)IP until we have completed the instruction.
+			 * if interrupted by a page fault, EIP must be unmodified. */
 			Bit32s addip=Fetchds();
-			SAVEIP;
-			Push_32(reg_eip);
-			reg_eip+=addip;
+			Bit32u here=GETIP;
+			Push_32(here);
+			reg_eip=(Bit32u)(addip+here);
 			continue;
 		}
 	CASE_D(0xe9)												/* JMP Jd */
@@ -663,9 +710,13 @@
 				RMEd(DECD);
 				break;
 			case 0x02:											/* CALL NEAR Ed */
-				if (rm >= 0xc0 ) {GetEArd;reg_eip=*eard;}
-				else {GetEAa;reg_eip=LoadMd(eaa);}
-				Push_32(GETIP);
+				{ /* either EIP is set to the call address or EIP does not change if interrupted by PF */
+					Bit32u new_eip;
+					if (rm >= 0xc0 ) {GetEArd;new_eip=*eard;}
+					else {GetEAa;new_eip=LoadMd(eaa);}
+					Push_32(GETIP); /* <- PF can happen here */
+					reg_eip = new_eip;
+				}
 				continue;
 			case 0x03:											/* CALL FAR Ed */
 				{
@@ -709,7 +760,7 @@
 				else {GetEAa;Push_32(LoadMd(eaa));}
 				break;
 			default:
-				LOG(LOG_CPU,LOG_ERROR)("CPU:66:GRP5:Illegal call %2X",which);
+				LOG(LOG_CPU,LOG_ERROR)("CPU:66:GRP5:Illegal call %2X",(int)which);
 				goto illegal_opcode;
 			}
 			break;

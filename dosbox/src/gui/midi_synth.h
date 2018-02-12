@@ -34,36 +34,9 @@ extern "C" {
   void fluid_log_config(void);
 }
 
-static fluid_log_function_t fluid_log_function[LAST_LOG_LEVEL];
-static int fluid_log_initialized = 0;
-#if 0
-void fluid_log_config(void) {
-  if (fluid_log_initialized == 0) {
+//static fluid_log_function_t fluid_log_function[LAST_LOG_LEVEL];
+//static int fluid_log_initialized = 0;
 
-    fluid_log_initialized = 1;
-
-    if (fluid_log_function[FLUID_PANIC] == NULL) {
-      fluid_set_log_function(FLUID_PANIC, fluid_default_log_function, NULL);
-    }
-
-    if (fluid_log_function[FLUID_ERR] == NULL) {
-      fluid_set_log_function(FLUID_ERR, fluid_default_log_function, NULL);
-    }
-
-    if (fluid_log_function[FLUID_WARN] == NULL) {
-      fluid_set_log_function(FLUID_WARN, fluid_default_log_function, NULL);
-    }
-
-    if (fluid_log_function[FLUID_INFO] == NULL) {
-      fluid_set_log_function(FLUID_INFO, fluid_default_log_function, NULL);
-    }
-
-    if (fluid_log_function[FLUID_DBG] == NULL) {
-      fluid_set_log_function(FLUID_DBG, fluid_default_log_function, NULL);
-    }
-  }
-}
-#endif
 struct _fluid_midi_event_t {
   fluid_midi_event_t* next; /* Link to next event */
   void *paramptr;           /* Pointer parameter (for SYSEX data), size is stored to param1, param2 indicates if pointer should be freed (dynamic if TRUE) */
@@ -82,18 +55,7 @@ struct _fluid_midi_parser_t {
   unsigned char data[1024]; /* The parameters or SYSEX data */
   fluid_midi_event_t event;        /* The event, that is returned to the MIDI driver. */
 };
-#if 0
-fluid_midi_parser_t* new_fluid_midi_parser() {
-      fluid_midi_parser_t* parser;
-      parser = FLUID_NEW(fluid_midi_parser_t);
-      if (parser == NULL) {
-            //FLUID_LOG(FLUID_ERR, "Out of memory");
-            return NULL;
-      }
-      parser->status = 0;
-      return parser;
-}
-#endif
+
 enum fluid_midi_event_type {
   /* channel messages */
   NOTE_OFF = 0x80,
@@ -123,6 +85,7 @@ enum fluid_midi_event_type {
   MIDI_META_EVENT = 0xff
 };
 
+#if 0 /* UNUSED CODE */
 static int fluid_midi_event_length(unsigned char event) {
       switch (event & 0xF0) {
             case NOTE_OFF: 
@@ -148,105 +111,8 @@ static int fluid_midi_event_length(unsigned char event) {
       }
       return 1;
 }
-#if 0
-fluid_midi_event_t * fluid_midi_parser_parse(fluid_midi_parser_t* parser, unsigned char c) {
-  fluid_midi_event_t *event;
-
-  /* Real-time messages (0xF8-0xFF) can occur anywhere, even in the middle
-   * of another message. */
-  if (c >= 0xF8)
-  {
-    if (c == MIDI_SYSTEM_RESET)
-    {
-      parser->event.type = c;
-      parser->status = 0;       /* clear the status */
-      return &parser->event;
-    }
-
-    return NULL;
-  }
-
-  /* Status byte? - If previous message not yet complete, it is discarded (re-sync). */
-  if (c & 0x80)
-  {
-    /* Any status byte terminates SYSEX messages (not just 0xF7) */
-    if (parser->status == MIDI_SYSEX && parser->nr_bytes > 0)
-    {
-      event = &parser->event;
-      fluid_midi_event_set_sysex (event, parser->data, parser->nr_bytes, FALSE);
-    }
-    else event = NULL;
-
-    if (c < 0xF0)       /* Voice category message? */
-    {
-      parser->channel = c & 0x0F;
-      parser->status = c & 0xF0;
-
-      /* The event consumes x bytes of data... (subtract 1 for the status byte) */
-      parser->nr_bytes_total = fluid_midi_event_length (parser->status) - 1;
-
-      parser->nr_bytes = 0;     /* 0  bytes read so far */
-    }
-    else if (c == MIDI_SYSEX)
-    {
-      parser->status = MIDI_SYSEX;
-      parser->nr_bytes = 0;
-    }
-    else parser->status = 0;    /* Discard other system messages (0xF1-0xF7) */
-
-    return event;       /* Return SYSEX event or NULL */
-  }
-
-
-  /* Data/parameter byte */
-
-
-  /* Discard data bytes for events we don't care about */
-  if (parser->status == 0)
-    return NULL;
-
-  /* Max data size exceeded? (SYSEX messages only really) */
-  if (parser->nr_bytes == 1024)
-  {
-    parser->status = 0;         /* Discard the rest of the message */
-    return NULL;
-  }
-
-  /* Store next byte */
-  parser->data[parser->nr_bytes++] = c;
-
-  /* Do we still need more data to get this event complete? */
-  if (parser->nr_bytes < parser->nr_bytes_total)
-    return NULL;
-
-  /* Event is complete, return it.
-   * Running status byte MIDI feature is also handled here. */
-  parser->event.type = parser->status;
-  parser->event.channel = parser->channel;
-  parser->nr_bytes = 0;         /* Reset data size, in case there are additional running status messages */
-
-  switch (parser->status)
-  {
-    case NOTE_OFF:
-    case NOTE_ON:
-    case KEY_PRESSURE:
-    case CONTROL_CHANGE:
-    case PROGRAM_CHANGE:
-    case CHANNEL_PRESSURE:
-      parser->event.param1 = parser->data[0]; /* For example key number */
-      parser->event.param2 = parser->data[1]; /* For example velocity */
-      break;
-    case PITCH_BEND:
-      /* Pitch-bend is transmitted with 14-bit precision. */
-      parser->event.param1 = (parser->data[1] << 7) | parser->data[0];
-      break;
-    default: /* Unlikely */
-      return NULL;
-  }
-
-  return &parser->event;
-}
 #endif
+
 int delete_fluid_midi_parser(fluid_midi_parser_t* parser) {
       FLUID_FREE(parser);
       return FLUID_OK;
@@ -257,12 +123,12 @@ int delete_fluid_midi_parser(fluid_midi_parser_t* parser) {
 #include "mixer.h"
 #endif
 
-static MixerChannel *synthchan;
+static MixerChannel *synthchan = NULL;
 
-static fluid_synth_t *synth_soft;
-static fluid_midi_parser_t *synth_parser;
+static fluid_synth_t *synth_soft = NULL;
+static fluid_midi_parser_t *synth_parser = NULL;
 
-static int synthsamplerate;
+static int synthsamplerate = 0;
 
 
 static void synth_log(int level, char *message, void *data) {
@@ -283,8 +149,10 @@ static void synth_log(int level, char *message, void *data) {
 }
 
 static void synth_CallBack(Bitu len) {
-	fluid_synth_write_s16(synth_soft, len, MixTemp, 0, 2, MixTemp, 1, 2);
-	synthchan->AddSamples_s16(len,(Bit16s *)MixTemp);
+    if (synth_soft != NULL) {
+        fluid_synth_write_s16(synth_soft, len, MixTemp, 0, 2, MixTemp, 1, 2);
+        synthchan->AddSamples_s16(len,(Bit16s *)MixTemp);
+    }
 }
 
 class MidiHandler_synth: public MidiHandler {
@@ -295,13 +163,13 @@ private:
 	bool isOpen;
 
 public:
-	MidiHandler_synth() : isOpen(false),MidiHandler() {};
+	MidiHandler_synth() : MidiHandler(),isOpen(false) {};
 	const char * GetName(void) { return "synth"; };
 	bool Open(const char *conf) {
 
 		/* Sound font file required */
 		if (!conf || (conf[0] == '\0')) {
-			LOG_MSG("SYNTH: Specify .SF2 sound font file with config=");
+			LOG(LOG_MISC,LOG_DEBUG)("SYNTH: Specify .SF2 sound font file with config=");
 			return false;
 		}
 
@@ -315,90 +183,56 @@ public:
 		/* Create the settings. */
 		settings = new_fluid_settings();
 		if (settings == NULL) {
-			LOG_MSG("SYNTH: Error allocating MIDI soft synth settings");
+			LOG(LOG_MISC,LOG_WARN)("SYNTH: Error allocating MIDI soft synth settings");
 			return false;
 		}
 
 		fluid_settings_setstr(settings, "audio.sample-format", "16bits");
 
 		if (synthsamplerate == 0) {
-			synthsamplerate = 48000;
+			synthsamplerate = 44100;
 		}
 
 		fluid_settings_setnum(settings,
 			"synth.sample-rate", (double)synthsamplerate);
-		
-		fluid_settings_setnum(settings,
-         		"synth.gain", 0.6);
-		
-		fluid_settings_setstr(settings,
-         		"synth.reverb.active", "yes");
-
-		fluid_settings_setstr(settings,
-         		"synth.chorus.active", "yes");
-
-		fluid_settings_setnum(settings,
-         		"audio.periods", 2);
-
-		fluid_settings_setnum(settings,
-         		"audio.period-size", 256);
-
-		fluid_settings_setnum(settings,
-        		"player.reset-synth", 0);
-
-		fluid_settings_setnum(settings,
-        		"synth.min-note-length", 0);
-
-		fluid_settings_setstr(settings,
-        		"player.timing-source", "system");
-
-		fluid_settings_setnum(settings,
-        		"synth.cpu-cores", 1);
 
 		//fluid_settings_setnum(settings,
-        	//	"synth.overflow.age", -10000);
-
-		//fluid_settings_setnum(settings,
-        	//	"synth.overflow.percussion", -10000);
-
-		//fluid_settings_setnum(settings,
-        	//	"synth.overflow.released", -10000);
-
-		//fluid_settings_setnum(settings,
-        	//	"synth.overflow.sustained", -10000);
-
-		//fluid_settings_setnum(settings,
-        	//	"synth.overflow.volume", -10000);
-
-    		// gm ignores CC0 and CC32 msgs
-    		// gs CC0 becomes the channel bank, CC32 is ignored; default
-    		// xg CC32 becomes the channel bank, CC0 is ignored
-    		// mma bank = CC0*128+CC32 
-		fluid_settings_setstr(settings,
-         		"synth.midi-bank-select", "gs");
+		//	"synth.gain", 0.5);
 
 		/* Create the synthesizer. */
 		synth_soft = new_fluid_synth(settings);
 		if (synth_soft == NULL) {
-			LOG_MSG("SYNTH: Error initialising MIDI soft synth");
+			LOG(LOG_MISC,LOG_WARN)("SYNTH: Error initialising MIDI soft synth");
 			delete_fluid_settings(settings);
 			return false;
 		}
 
 		/* Load a SoundFont */
+		extern std::string capturedir;
+		char str[260];
+		strcpy(str,capturedir.c_str());
+		#if defined (WIN32) || defined (OS2)
+		strcat(str,"\\");
+		#else
+		strcat(str,"/");
+		#endif
+		strcat(str,conf);
 		sfont_id = fluid_synth_sfload(synth_soft, conf, 0);
 		if (sfont_id == -1) {
-			LOG_MSG("SYNTH: Failed to load MIDI sound font file \"%s\"",
-			   conf);
-			delete_fluid_synth(synth_soft);
-			delete_fluid_settings(settings);
-			return false;
+			sfont_id = fluid_synth_sfload(synth_soft, str, 0);
+			if (sfont_id == -1) {
+				LOG(LOG_MISC,LOG_WARN)("SYNTH: Failed to load MIDI sound font file \"%s\"",
+				   conf);
+				delete_fluid_synth(synth_soft);
+				delete_fluid_settings(settings);
+				return false;
+			}
 		}
 
 		/* Allocate one event to store the input data */
 		synth_parser = new_fluid_midi_parser();
 		if (synth_parser == NULL) {
-			LOG_MSG("SYNTH: Failed to allocate MIDI parser");
+			LOG(LOG_MISC,LOG_WARN)("SYNTH: Failed to allocate MIDI parser");
 			delete_fluid_synth(synth_soft);
 			delete_fluid_settings(settings);
 			return false;
@@ -408,7 +242,7 @@ public:
 					       fluid_synth_handle_midi_event,
 					       (void*)synth_soft);
 		if (router == NULL) {
-			LOG_MSG("SYNTH: Failed to initialise MIDI router");
+			LOG(LOG_MISC,LOG_WARN)("SYNTH: Failed to initialise MIDI router");
 			delete_fluid_midi_parser(synth_parser);
 			delete_fluid_synth(synth_soft);
 			delete_fluid_settings(settings);
@@ -423,16 +257,25 @@ public:
 	};
 	void Close(void) {
 		if (!isOpen) return;
+
+        synthchan->Enable(false);
+        MIXER_DelChannel(synthchan);
+        synthchan=NULL;
+
 		delete_fluid_midi_router(router);
 		delete_fluid_midi_parser(synth_parser);
 		delete_fluid_synth(synth_soft);
 		delete_fluid_settings(settings);
+        synth_parser=NULL;
+        synth_soft=NULL;
+        settings=NULL;
 		isOpen=false;
+        router=NULL;
 	};
 	void PlayMsg(Bit8u *msg) {
 		fluid_midi_event_t *evt;
 		Bitu len;
-		int i;
+		Bitu i;
 
 		len=MIDI_evt_len[*msg];
 		synthchan->Enable(true);
@@ -448,7 +291,7 @@ public:
 	};
 	void PlaySysex(Bit8u *sysex, Bitu len) {
 		fluid_midi_event_t *evt;
-		int i;
+		Bitu i;
 
 		/* let the parser convert the data into events */
 		for (i = 0; i < len; i++) {

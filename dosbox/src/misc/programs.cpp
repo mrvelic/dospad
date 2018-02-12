@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2002-2015  The DOSBox Team
+ *  Copyright (C) 2002-2013  The DOSBox Team
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -40,17 +40,18 @@ extern bool dos_kernel_disabled;
 /* This registers a file on the virtual drive and creates the correct structure for it*/
 
 static Bit8u exe_block[]={
-	0xbc,0x00,0x04,					//MOV SP,0x400 decrease stack size
-	0xbb,0x40,0x00,					//MOV BX,0x040 for memory resize
-	0xb4,0x4a,						//MOV AH,0x4A	Resize memory block
-	0xcd,0x21,						//INT 0x21
-//pos 12 is callback number
-	0xFE,0x38,0x00,0x00,			//CALLBack number
-	0xb8,0x00,0x4c,					//Mov ax,4c00
-	0xcd,0x21,						//INT 0x21
-};
+	0xbc,0x00,0x04,					//0x100 MOV SP,0x400  decrease stack size
+	0xbb,0x40,0x00,					//0x103 MOV BX,0x0040 for memory resize
+	0xb4,0x4a,					//0x106 MOV AH,0x4A   Resize memory block
+	0xcd,0x21,					//0x108 INT 0x21      ...
+	0x30,0xc0,					//0x10A XOR AL,AL     Clear AL (exit code). Program will write AL to modify exit status
+//pos 14 is callback number
+	0xFE,0x38,0x00,0x00,				//0x10C CALLBack number
+	0xb4,0x4c,					//0x110 Mov AH,0x4C   Prepare to exit, preserve AL
+	0xcd,0x21					//0x112 INT 0x21      Exit to DOS
+};							//0x114 --DONE--
 
-#define CB_POS 12
+#define CB_POS 14
 
 class InternalProgramEntry {
 public:
@@ -75,6 +76,8 @@ public:
 static std::vector<InternalProgramEntry*> internal_progs;
 
 void PROGRAMS_Shutdown(void) {
+	LOG(LOG_MISC,LOG_DEBUG)("Shutting down internal programs list");
+
 	for (size_t i=0;i < internal_progs.size();i++) {
 		if (internal_progs[i] != NULL) {
 			delete internal_progs[i];
@@ -153,9 +156,16 @@ Program::Program() {
 	char filename[256+1];
 	MEM_StrCopy(envscan,filename,256);
 	cmd = new CommandLine(filename,tail.buffer);
+	exit_status = 0;
 }
 
 extern std::string full_arguments;
+
+void Program::WriteExitStatus() {
+	/* the exe block was modified that on return to DOS only AH is modified, leaving AL normally
+	 * zero but we're free to set AL to any other value to set exit code */
+	reg_al = exit_status;
+}
 
 void Program::ChangeToLongCmd() {
 	/* 
@@ -375,6 +385,32 @@ Bitu Program::GetEnvCount(void) {
 	return num;
 }
 
+void Program::DebugDumpEnv() {
+	PhysPt env_base,env_fence,env_scan;
+	unsigned char c;
+	std::string tmp;
+
+	if (dos_kernel_disabled)
+		return;
+
+	if (!LocateEnvironmentBlock(env_base,env_fence,psp->GetEnvironment()))
+		return;
+
+	env_scan = env_base;
+	LOG_MSG("DebugDumpEnv()");
+	while (env_scan < env_fence) {
+		if (mem_readb(env_scan) == 0) break;
+
+		while (env_scan < env_fence) {
+			if ((c=mem_readb(env_scan++)) == 0) break;
+			tmp += c;
+		}
+
+		LOG_MSG("...%s",tmp.c_str());
+		tmp = "";
+	}
+}
+
 /* NTS: "entry" string must have already been converted to uppercase */
 bool Program::SetEnv(const char * entry,const char * new_string) {
 	PhysPt env_base,env_fence,env_scan;
@@ -410,7 +446,8 @@ bool Program::SetEnv(const char * entry,const char * new_string) {
 			/* before we remove it: is there room for the new value? */
 			if (nsl != 0) {
 				if ((env_scan+needs) > env_fence) {
-					LOG_MSG("Program::SetEnv() error, insufficient room for environment variable %s=%s\n",bigentry.c_str(),new_string);
+					LOG_MSG("Program::SetEnv() error, insufficient room for environment variable %s=%s (replacement)\n",bigentry.c_str(),new_string);
+					DebugDumpEnv();
 					return false;
 				}
 			}
@@ -439,7 +476,8 @@ bool Program::SetEnv(const char * entry,const char * new_string) {
 	/* add the string to the end of the block */
 	if (*new_string != 0) {
 		if ((env_scan+needs) > env_fence) {
-			LOG_MSG("Program::SetEnv() error, insufficient room for environment variable %s=%s\n",bigentry.c_str(),new_string);
+			LOG_MSG("Program::SetEnv() error, insufficient room for environment variable %s=%s (addition)\n",bigentry.c_str(),new_string);
+			DebugDumpEnv();
 			return false;
 		}
 
@@ -452,7 +490,7 @@ bool Program::SetEnv(const char * entry,const char * new_string) {
 		mem_writeb(env_scan++,0);
 		mem_writeb(env_scan++,0);
 
-		assert(env_scan < env_fence);
+		assert(env_scan <= env_fence);
 	}
 
 	return true;
@@ -467,15 +505,17 @@ public:
 private:
 	void restart(const char* useconfig);
 	
-	void writeconf(std::string name, bool configdir) {
+	void writeconf(std::string name, bool configdir,bool everything) {
+#if 0 /* I'd rather have an option stating the user wants to write to user homedir */
 		if (configdir) {
 			// write file to the default config directory
 			std::string config_path;
 			Cross::GetPlatformConfigDir(config_path);
 			name = config_path + name;
 		}
+#endif
 		WriteOut(MSG_Get("PROGRAM_CONFIG_FILE_WHICH"),name.c_str());
-		if (!control->PrintConfig(name.c_str())) {
+		if (!control->PrintConfig(name.c_str(),everything)) {
 			WriteOut(MSG_Get("PROGRAM_CONFIG_FILE_ERROR"),name.c_str());
 		}
 		return;
@@ -494,7 +534,7 @@ void CONFIG::Run(void) {
 	static const char* const params[] = {
 		"-r", "-wcp", "-wcd", "-wc", "-writeconf", "-l", "-rmconf",
 		"-h", "-help", "-?", "-axclear", "-axadd", "-axtype", "-get", "-set",
-		"-writelang", "-wl", "-securemode", NULL };
+		"-writelang", "-wl", "-securemode", "-all", "-errtest", NULL };
 	enum prs {
 		P_NOMATCH, P_NOPARAMS, // fixed return values for GetParameterFromList
 		P_RESTART,
@@ -504,16 +544,26 @@ void CONFIG::Run(void) {
 		P_AUTOEXEC_CLEAR, P_AUTOEXEC_ADD, P_AUTOEXEC_TYPE,
 		P_GETPROP, P_SETPROP,
 		P_WRITELANG, P_WRITELANG2,
-		P_SECURE
+		P_SECURE, P_ALL, P_ERRTEST
 	} presult = P_NOMATCH;
-	
+
+	bool all = false;
 	bool first = true;
 	std::vector<std::string> pvars;
 	// Loop through the passed parameters
 	while(presult != P_NOPARAMS) {
 		presult = (enum prs)cmd->GetParameterFromList(params, pvars);
 		switch(presult) {
-		
+	
+		case P_ALL:
+			all = true;
+			break;
+
+		case P_ERRTEST:
+			exit_status = 1;
+			WriteExitStatus();
+			return;
+
 		case P_RESTART:
 			if (securemode_check()) return;
 			if (pvars.size() == 0) restart_program(control->startup_params);
@@ -559,10 +609,10 @@ void CONFIG::Run(void) {
 			if (pvars.size() > 1) return;
 			else if (pvars.size() == 1) {
 				// write config to specific file, except if it is an absolute path
-				writeconf(pvars[0], !Cross::IsPathAbsolute(pvars[0]));
+				writeconf(pvars[0], !Cross::IsPathAbsolute(pvars[0]), all);
 			} else {
 				// -wc without parameter: write primary config file
-				if (control->configfiles.size()) writeconf(control->configfiles[0], false);
+				if (control->configfiles.size()) writeconf(control->configfiles[0], false, all);
 				else WriteOut(MSG_Get("PROGRAM_CONFIG_NOCONFIGFILE"));
 			}
 			break;
@@ -572,7 +622,7 @@ void CONFIG::Run(void) {
 			if (pvars.size() > 0) return;
 			std::string confname;
 			Cross::GetPlatformConfigName(confname);
-			writeconf(confname, true);
+			writeconf(confname, true, all);
 			break;
 		}
 		case P_WRITECONF_PORTABLE:
@@ -580,10 +630,10 @@ void CONFIG::Run(void) {
 			if (pvars.size() > 1) return;
 			else if (pvars.size() == 1) {
 				// write config to startup directory
-				writeconf(pvars[0], false);
+				writeconf(pvars[0], false, all);
 			} else {
 				// -wcp without parameter: write dosbox.conf to startup directory
-				if (control->configfiles.size()) writeconf(std::string("dosbox.conf"), false);
+				if (control->configfiles.size()) writeconf(std::string("dosbox.conf"), false, all);
 				else WriteOut(MSG_Get("PROGRAM_CONFIG_NOCONFIGFILE"));
 			}
 			break;
@@ -789,7 +839,6 @@ void CONFIG::Run(void) {
 					// it's a property name
 					std::string val = sec->GetPropValue(pvars[0].c_str());
 					WriteOut("%s",val.c_str());
-					first_shell->SetEnv("CONFIG",val.c_str());
 				}
 				break;
 			}
@@ -807,7 +856,6 @@ void CONFIG::Run(void) {
 					return;
 				}
 				WriteOut("%s",val.c_str());
-				first_shell->SetEnv("CONFIG",val.c_str());
 				break;
 			}
 			default:
@@ -924,11 +972,9 @@ void CONFIG::Run(void) {
 			for(Bitu i = 3; i < pvars.size(); i++) value += (std::string(" ") + pvars[i]);
 			std::string inputline = pvars[1] + "=" + value;
 			
-			tsec->ExecuteDestroy(false);
 			bool change_success = tsec->HandleInputline(inputline.c_str());
 			if (!change_success) WriteOut(MSG_Get("PROGRAM_CONFIG_VALUE_ERROR"),
 				value.c_str(),pvars[1].c_str());
-			tsec->ExecuteInit(false);
 			return;
 		}
 		case P_WRITELANG: case P_WRITELANG2:
@@ -965,8 +1011,11 @@ static void CONFIG_ProgramStart(Program * * make) {
 	*make=new CONFIG;
 }
 
+/* FIXME: Rename the function to clarify it does not init programs, it inits the callback mechanism
+ *        that program generation on drive Z: needs to tie a .COM executable to a callback */
+void PROGRAMS_Init() {
+	LOG(LOG_MISC,LOG_DEBUG)("PROGRAMS_Init(): initializing Z: drive .COM stub and program management");
 
-void PROGRAMS_Init(Section* /*sec*/) {
 	/* Setup a special callback to start virtual programs */
 	call_program=CALLBACK_Allocate();
 	CALLBACK_Setup(call_program,&PROGRAMS_Handler,CB_RETF,"internal program");
@@ -987,6 +1036,7 @@ void PROGRAMS_Init(Section* /*sec*/) {
 		"-writeconf or -wc without parameter: write to primary loaded config file.\n"\
 		"-writeconf or -wc with filename: write file to config directory.\n"\
 		"Use -writelang or -wl filename to write the current language strings.\n"\
+		"-all  Use -all with -wc and -writeconf to write ALL options to the file.\n"\
 		"-r [parameters]\n Restart DOSBox, either using the previous parameters or any that are appended.\n"\
 		"-wcp [filename]\n Write config file to the program directory, dosbox.conf or the specified \n filename.\n"\
 		"-wcd\n Write to the default config file in the config directory.\n"\

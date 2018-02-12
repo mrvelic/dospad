@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2002-2015  The DOSBox Team
+ *  Copyright (C) 2002-2013  The DOSBox Team
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -39,8 +39,15 @@
 
 class CommandLine {
 public:
-	CommandLine(int argc,char const * const argv[]);
-	CommandLine(char const * const name,char const * const cmdline);
+	enum opt_style {
+		dos=0,		// MS-DOS style /switches
+		gnu,		// GNU style --switches or -switches, switch parsing stops at --
+		gnu_getopt,	// GNU style --long or -a -b -c -d or -abcd (short as single char), switch parsing stops at --
+		either		// both dos and gnu, switch parsing stops at --
+	};
+public:
+	CommandLine(int argc,char const * const argv[],enum opt_style opt=CommandLine::either);
+	CommandLine(char const * const name,char const * const cmdline,enum opt_style opt=CommandLine::either);
 	const char * GetFileName(){ return file_name.c_str();}
 
 	bool FindExist(char const * const name,bool remove=false);
@@ -58,10 +65,25 @@ public:
 	void Shift(unsigned int amount=1);
 	Bit16u Get_arglength();
 
+	bool BeginOpt(bool eat_argv=true);
+	bool GetOpt(std::string &name);
+	bool NextOptArgv(std::string &argv);
+	bool GetOptGNUSingleCharCheck(std::string &name);
+	void ChangeOptStyle(enum opt_style opt_style);
+	void EndOpt();
+
+    bool GetCurrentArgv(std::string &argv);
+    bool CurrentArgvEnd(void);
+    void EatCurrentArgv(void);
+    void NextArgv(void);
 private:
 	typedef std::list<std::string>::iterator cmd_it;
+	std::string opt_gnu_getopt_singlechar;		/* non-empty if we hit GNU options like -abcd => -a -b -c -d */
+	cmd_it opt_scan;
+	bool opt_eat_argv;
 	std::list<std::string> cmds;
 	std::string file_name;
+	enum opt_style opt_style;
 	bool FindEntry(char const * const name,cmd_it & it,bool neednext=false);
 };
 
@@ -72,6 +94,7 @@ public:
 		if (cmd != NULL) delete cmd;
 		if (psp != NULL) delete psp;
 	}
+	unsigned char exit_status;
 	std::string temp_line;
 	CommandLine * cmd;
 	DOS_PSP * psp;
@@ -83,7 +106,8 @@ public:
 	void WriteOut(const char * format,...);				/* Write to standard output */
 	void WriteOut_NoParsing(const char * format);				/* Write to standard output, no parsing */
 	void ChangeToLongCmd();
-
+	void DebugDumpEnv();
+	void WriteExitStatus();
 };
 
 typedef void (PROGRAMS_Main)(Program * * make);

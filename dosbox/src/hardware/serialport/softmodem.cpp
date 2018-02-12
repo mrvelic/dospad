@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2002-2015  The DOSBox Team
+ *  Copyright (C) 2002-2013  The DOSBox Team
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -154,6 +154,7 @@ void CSerialModem::SendRes(ResTypes response) {
 		case ResNODIALTONE: string="NO DIALTONE"; code=6; break;
 		case ResNOCARRIER:	string="NO CARRIER" ;code=3; break;
 		case ResCONNECT:	string="CONNECT 57600"; code=1; break;
+		default:		return;
 	}
 	
 	if(doresponse!=1) {
@@ -270,16 +271,16 @@ void CSerialModem::EnterIdleState(void){
 	}
 	// get rid of everything
 	if(serversocket) {
-		while(waitingclientsocket=serversocket->Accept())
+		while ((waitingclientsocket=serversocket->Accept()))
 			delete waitingclientsocket;
 	} else if (listenport) {
 		
 		serversocket=new TCPServerSocket(listenport);	
 		if(!serversocket->isopen) {
-			LOG_MSG("Serial%d: Modem could not open TCP port %d.",COMNUMBER,listenport);
+			LOG_MSG("Serial%d: Modem could not open TCP port %d.",(int)COMNUMBER,(int)listenport);
 			delete serversocket;
 			serversocket=0;
-		} else LOG_MSG("Serial%d: Modem listening on port %d...",COMNUMBER,listenport);
+		} else LOG_MSG("Serial%d: Modem listening on port %d...",(int)COMNUMBER,(int)listenport);
 	}
 	waitingclientsocket=0;
 	
@@ -362,23 +363,18 @@ void CSerialModem::DoCommand() {
 				helper[0]=0;
 				helper--;
 			}
-
-			//Large enough scope, so the buffers are still valid when reaching Dail.
-			char buffer[128];
-			char obuffer[128];
 			if (strlen(foundstr) >= 12) {
 				// Check if supplied parameter only consists of digits
 				bool isNum = true;
-				size_t fl = strlen(foundstr);
-				for (size_t i = 0; i < fl; i++)
+				for (Bitu i=0; i<strlen(foundstr); i++)
 					if (foundstr[i] < '0' || foundstr[i] > '9') isNum = false;
 				if (isNum) {
 					// Parameter is a number with at least 12 digits => this cannot
 					// be a valid IP/name
 					// Transform by adding dots
-					size_t j = 0;
-					size_t foundlen = strlen(foundstr);
-					for (size_t i = 0; i < foundlen; i++) {
+					char buffer[128];
+					Bitu j = 0;
+					for (Bitu i=0; i<strlen(foundstr); i++) {
 						buffer[j++] = foundstr[i];
 						// Add a dot after the third, sixth and ninth number
 						if (i == 2 || i == 5 || i == 8)
@@ -390,19 +386,6 @@ void CSerialModem::DoCommand() {
 					}
 					buffer[j] = 0;
 					foundstr = buffer;
-
-					// Remove Zeros from beginning of octets
-					size_t k = 0;
-					size_t foundlen2 = strlen(foundstr);
-					for (size_t i = 0; i < foundlen2; i++) {
-						if (i == 0 && foundstr[0] == '0') continue;
-						if (i == 1 && foundstr[0] == '0' && foundstr[1] == '0') continue;
-						if (foundstr[i] == '0' && foundstr[i-1] == '.') continue;
-						if (foundstr[i] == '0' && foundstr[i-1] == '0' && foundstr[i-2] == '.') continue;
-						obuffer[k++] = foundstr[i];
-						}
-					obuffer[k] = 0;
-					foundstr = obuffer;
 				}
 			}
 			Dial(foundstr);
@@ -410,8 +393,8 @@ void CSerialModem::DoCommand() {
 		}
 		case 'I': // Some strings about firmware
 			switch (ScanNumber(scanbuf)) {
-			case 3: SendLine("DOSBox Emulated Modem Firmware V1.00"); break;
-			case 4: SendLine("Modem compiled for DOSBox version " VERSION); break;
+			case 3: SendLine("DosBox Emulated Modem Firmware V1.00"); break;
+			case 4: SendLine("Modem compiled for DosBox version " VERSION); break;
 			}
 			break;
 		case 'E': // Echo on/off
@@ -527,7 +510,7 @@ void CSerialModem::DoCommand() {
 					SendRes(ResERROR);
 					return;
 				default:
-					LOG_MSG("Modem: Unhandled command: &%c%d",cmdchar,ScanNumber(scanbuf));
+					LOG_MSG("Modem: Unhandled command: &%c%d",cmdchar,(int)ScanNumber(scanbuf));
 					break;
 			}
 			break;
@@ -547,7 +530,7 @@ void CSerialModem::DoCommand() {
 					SendRes(ResERROR);
 					return;
 				default:
-					LOG_MSG("Modem: Unhandled command: \\%c%d",cmdchar, ScanNumber(scanbuf));
+					LOG_MSG("Modem: Unhandled command: \\%c%d",cmdchar, (int)ScanNumber(scanbuf));
 					break;
 			}
 			break;
@@ -556,7 +539,7 @@ void CSerialModem::DoCommand() {
 			SendRes(ResOK);
 			return;
 		default:
-			LOG_MSG("Modem: Unhandled command: %c%d",chr,ScanNumber(scanbuf));
+			LOG_MSG("Modem: Unhandled command: %c%d",chr,(int)ScanNumber(scanbuf));
 			break;
 		}
 	}
@@ -665,7 +648,6 @@ void CSerialModem::TelnetEmulation(Bit8u * data, Bitu size) {
 
 void CSerialModem::Timer2(void) {
 
-	unsigned long args = 1;
 	bool sendbyte = true;
 	Bitu usesize;
 	Bit8u txval;

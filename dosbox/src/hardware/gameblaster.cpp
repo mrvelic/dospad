@@ -26,13 +26,14 @@
 #include "pic.h"
 #include <cstring>
 #include <math.h>
-#include "../save_state.h"
 
 
 #define LEFT	0x00
 #define RIGHT	0x01
 #define CMS_BUFFER_SIZE 128
 #define CMS_RATE 22050
+/*#define MASTER_CLOCK 14318180/2 */
+#define MASTER_CLOCK 7159090
 
 
 typedef Bit8u UINT8;
@@ -206,9 +207,9 @@ static void saa1099_update(int chip, INT16 **buffer, int length)
     {
 		switch (saa->noise_params[ch])
 		{
-		case 0: saa->noise[ch].freq = 31250.0 * 2; break;
-		case 1: saa->noise[ch].freq = 15625.0 * 2; break;
-		case 2: saa->noise[ch].freq =  7812.5 * 2; break;
+		case 0: saa->noise[ch].freq = MASTER_CLOCK/256  * 2; break;
+		case 1: saa->noise[ch].freq = MASTER_CLOCK/512  * 2; break;
+		case 2: saa->noise[ch].freq = MASTER_CLOCK/1024 * 2; break;
 		case 3: saa->noise[ch].freq = saa->channels[ch * 3].freq; break;
 		}
 	}
@@ -222,7 +223,7 @@ static void saa1099_update(int chip, INT16 **buffer, int length)
 		for (ch = 0; ch < 6; ch++)
 		{
             if (saa->channels[ch].freq == 0.0)
-                saa->channels[ch].freq = (double)((2 * 15625) << saa->channels[ch].octave) /
+                saa->channels[ch].freq = (double)((2 * MASTER_CLOCK/512) << saa->channels[ch].octave) /
                     (511.0 - (double)saa->channels[ch].frequency);
 
             /* check the actual position in the square wave */
@@ -230,7 +231,7 @@ static void saa1099_update(int chip, INT16 **buffer, int length)
 			while (saa->channels[ch].counter < 0)
 			{
 				/* calculate new frequency now after the half wave is updated */
-				saa->channels[ch].freq = (double)((2 * 15625) << saa->channels[ch].octave) /
+				saa->channels[ch].freq = (double)((2 * MASTER_CLOCK/512) << saa->channels[ch].octave) /
 					(511.0 - (double)saa->channels[ch].frequency);
 
 				saa->channels[ch].counter += sample_rate;
@@ -489,161 +490,16 @@ public:
 };
 
 
-static CMS* test;
+static CMS* test = NULL;
    
 void CMS_Init(Section* sec) {
-	test = new CMS(sec);
+    if (test == NULL)
+    	test = new CMS(sec);
 }
 void CMS_ShutDown(Section* sec) {
-	delete test;	       
+    if (test) {
+        delete test;
+        test = NULL;
+    }
 }
 
-
-
-// save state support
-void POD_Save_Gameblaster( std::ostream& stream )
-{
-	const char pod_name[32] = "CMS";
-
-	if( stream.fail() ) return;
-	if( !test ) return;
-	if( !cms_chan ) return;
-
-	WRITE_POD( &pod_name, pod_name );
-
-	// - pure data
-	WRITE_POD( &sample_rate, sample_rate );
-	WRITE_POD( &saa1099, saa1099 );
-
-	WRITE_POD( &cms_buffer, cms_buffer );
-	WRITE_POD( &last_command, last_command );
-	WRITE_POD( &base_port, base_port );
-	WRITE_POD( &cms_detect_register, cms_detect_register );
-
-	//************************************************
-	//************************************************
-
-	cms_chan->SaveState(stream);
-}
-
-
-void POD_Load_Gameblaster( std::istream& stream )
-{
-	char pod_name[32] = {0};
-
-	if( stream.fail() ) return;
-	if( !test ) return;
-	if( !cms_chan ) return;
-
-	// error checking
-	READ_POD( &pod_name, pod_name );
-	if( strcmp( pod_name, "CMS" ) ) {
-		stream.clear( std::istream::failbit | std::istream::badbit );
-		return;
-	}
-
-	// - pure data
-	READ_POD( &sample_rate, sample_rate );
-	READ_POD( &saa1099, saa1099 );
-
-	READ_POD( &cms_buffer, cms_buffer );
-	READ_POD( &last_command, last_command );
-	READ_POD( &base_port, base_port );
-	READ_POD( &cms_detect_register, cms_detect_register );
-
-	//************************************************
-	//************************************************
-
-	cms_chan->LoadState(stream);
-}
-
-
-/*
-ykhwong svn-daum 2012-02-20
-
-
-static globals:
-
-
-struct SAA1099
-
-	// - pure data
-	int stream;
-	int noise_params[2];
-	int env_enable[2];
-	int env_reverse_right[2];
-	int env_mode[2];
-	int env_bits[2];
-	int env_clock[2];
-	int env_step[2];
-	int all_ch_enable;
-	int sync_state;
-	int selected_reg;
-	struct saa1099_channel channels[6];
-	struct saa1099_noise noise[2];
-
-
-	struct saa1099_channel:
-
-		// - pure data
-		int frequency;
-		int freq_enable;
-		int noise_enable;
-		int octave;
-		int amplitude[2];
-		int envelope[2];
-
-		// - pure data
-		double counter;
-		double freq;
-		int level;
-
-
-	struct saa1099_noise:
-
-		// - pure data
-		double counter;
-		double freq;
-		int level;
-
-
-
-// - static data
-static const UINT8 envelope[8][64];
-static const int amplitude_lookup[16];
-
-
-// - pure data
-static double sample_rate;
-static SAA1099 saa1099[2];
-
-
-// - static 'new' ptr
-static MixerChannel * cms_chan;
-
-
-// - pure data
-static Bit16s cms_buffer[2][2][CMS_BUFFER_SIZE];
-
-
-// - static ptrs
-static Bit16s * cms_buf_point[4] = {
-	cms_buffer[0][0],cms_buffer[0][1],cms_buffer[1][0],cms_buffer[1][1] };
-
-
-// - pure data
-static Bitu last_command;
-static Bitu base_port;
-static Bit8u cms_detect_register;
-
-
-
-// - static 'new' ptr
-static CMS* test;
-
-	// - static data
-	IO_WriteHandleObject WriteHandler;
-	IO_WriteHandleObject DetWriteHandler;
-	IO_ReadHandleObject DetReadHandler;
-	MixerObject MixerChan;
-*/

@@ -26,7 +26,6 @@
 #include "pic.h"
 #include "render.h"
 #include "mapper.h"
-#include "../save_state.h"
 
 static void write_crtc_index_other(Bitu /*port*/,Bitu val,Bitu /*iolen*/) {
 	vga.other.index=(Bit8u)(val & 0x1f);
@@ -109,7 +108,7 @@ static void write_crtc_data_other(Bitu /*port*/,Bitu val,Bitu /*iolen*/) {
 		vga.other.lightpen |= (Bit8u)val;
 		break;
 	default:
-		LOG(LOG_VGAMISC,LOG_NORMAL)("MC6845:Write %X to illegal index %x",val,vga.other.index);
+		LOG(LOG_VGAMISC,LOG_NORMAL)("MC6845:Write %X to illegal index %x",(int)val,(int)vga.other.index);
 	}
 }
 static Bitu read_crtc_data_other(Bitu /*port*/,Bitu /*iolen*/) {
@@ -177,16 +176,17 @@ static void write_lightpen(Bitu port,Bitu val,Bitu) {
 	}
 }
 
+Bit8u cga_comp = 0;
+bool new_cga = 0;
+
 static double hue_offset = 0.0;
-static Bit8u cga_comp = 0;
-static bool new_cga = 0;
 
 static Bit8u cga16_val = 0;
 static void update_cga16_color(void);
 static Bit8u herc_pal = 0;
 static Bit8u mono_cga_pal = 0;
 static Bit8u mono_cga_bright = 0;
-static Bit8u const mono_cga_palettes[6][16][3] =
+static Bit8u const mono_cga_palettes[8][16][3] =
 {
 	{ // 0 - green, 4-color-optimized contrast
 		{0x00,0x00,0x00},{0x00,0x0d,0x03},{0x01,0x17,0x05},{0x01,0x1a,0x06},{0x02,0x28,0x09},{0x02,0x2c,0x0a},{0x03,0x39,0x0d},{0x03,0x3c,0x0e},
@@ -211,6 +211,14 @@ static Bit8u const mono_cga_palettes[6][16][3] =
 	{ // 5 - grey, 16-color-optimized contrast
 		{0x00,0x00,0x00},{0x0d,0x0d,0x0d},{0x12,0x12,0x12},{0x15,0x15,0x15},{0x1e,0x1e,0x1e},{0x20,0x20,0x20},{0x29,0x29,0x29},{0x2c,0x2c,0x2c},
 		{0x1f,0x1f,0x1f},{0x23,0x23,0x23},{0x2b,0x2b,0x2b},{0x2d,0x2d,0x2d},{0x34,0x34,0x34},{0x36,0x36,0x36},{0x3d,0x3d,0x3d},{0x3f,0x3f,0x3f},
+	},
+	{ // 6 - paper-white, 4-color-optimized contrast
+		{0x00,0x00,0x00},{0x0e,0x0f,0x10},{0x15,0x17,0x18},{0x18,0x1a,0x1b},{0x24,0x25,0x25},{0x27,0x28,0x28},{0x33,0x34,0x32},{0x37,0x38,0x35},
+		{0x09,0x0a,0x0b},{0x11,0x12,0x13},{0x1c,0x1e,0x1e},{0x20,0x22,0x22},{0x2c,0x2d,0x2c},{0x2f,0x30,0x2f},{0x3c,0x3c,0x38},{0x3f,0x3f,0x3b},
+	},
+	{ // 7 - paper-white, 16-color-optimized contrast
+		{0x00,0x00,0x00},{0x0e,0x0f,0x10},{0x13,0x14,0x15},{0x15,0x17,0x18},{0x1e,0x20,0x20},{0x20,0x22,0x22},{0x29,0x2a,0x2a},{0x2c,0x2d,0x2c},
+		{0x1f,0x21,0x21},{0x23,0x25,0x25},{0x2b,0x2c,0x2b},{0x2d,0x2e,0x2d},{0x34,0x35,0x33},{0x37,0x37,0x34},{0x3e,0x3e,0x3a},{0x3f,0x3f,0x3b},
 	},
 };
 
@@ -413,7 +421,8 @@ static void write_cga_color_select(Bitu val) {
 		vga.attr.overscan_color = 0;
 		break;
 	case M_AMSTRAD: // Amstrad "palette". 0x3D9
-		Bitu x = 0;
+		break;
+	default:
 		break;
 	}
 }
@@ -734,13 +743,13 @@ static void write_pcjr(Bitu port,Bitu val,Bitu /*iolen*/) {
 
 static void CycleHercPal(bool pressed) {
 	if (!pressed) return;
-	if (++herc_pal>2) herc_pal=0;
+	if (++herc_pal>3) herc_pal=0;
 	Herc_Palette();
 }
 
 static void CycleMonoCGAPal(bool pressed) {
 	if (!pressed) return;
-	if (++mono_cga_pal>2) mono_cga_pal=0;
+	if (++mono_cga_pal>3) mono_cga_pal=0;
 	Mono_CGA_Palette();
 }
 
@@ -760,7 +769,11 @@ void Herc_Palette(void) {
 		VGA_DAC_SetEntry(0x7,0x34,0x20,0x00);
 		VGA_DAC_SetEntry(0xf,0x3f,0x34,0x00);
 		break;
-	case 2:	// Green
+	case 2:	// Paper-white
+		VGA_DAC_SetEntry(0x7,0x2c,0x2d,0x2c);
+		VGA_DAC_SetEntry(0xf,0x3f,0x3f,0x3b);
+		break;
+	case 3:	// Green
 		VGA_DAC_SetEntry(0x7,0x00,0x26,0x00);
 		VGA_DAC_SetEntry(0xf,0x00,0x3f,0x00);
 		break;
@@ -989,81 +1002,3 @@ void VGA_SetupOther(void) {
 	// AMSTRAD
 }
 
-
-
-// save state support
-
-void POD_Save_VGA_Other( std::ostream& stream )
-{
-	// - pure struct data
-	WRITE_POD( &vga.other, vga.other );
-
-	//****************************************
-	//****************************************
-
-	// static globals
-
-	// - system + user data
-	WRITE_POD( &hue_offset, hue_offset );
-	WRITE_POD( &cga16_val, cga16_val );
-	WRITE_POD( &herc_pal, herc_pal );
-	WRITE_POD( &mono_cga_pal, mono_cga_pal );
-	WRITE_POD( &mono_cga_bright, mono_cga_bright );
-}
-
-
-void POD_Load_VGA_Other( std::istream& stream )
-{
-	// - pure struct data
-	READ_POD( &vga.other, vga.other );
-
-	//****************************************
-	//****************************************
-
-	// static globals
-
-	// - system + user data
-	READ_POD( &hue_offset, hue_offset );
-	READ_POD( &cga16_val, cga16_val );
-	READ_POD( &herc_pal, herc_pal );
-	READ_POD( &mono_cga_pal, mono_cga_pal );
-	READ_POD( &mono_cga_bright, mono_cga_bright );
-}
-
-
-/*
-ykhwong svn-daum 2012-02-20
-
-static globals:
-
-- pure data (system + exe modifiable)
-static double hue_offset;
-static Bit8u cga16_val;
-static Bit8u herc_pal;
-static Bit8u mono_cga_pal;
-static Bit8u mono_cga_bright;
-
-- static data
-static const Bit8u mono_cga_palettes[6][16][3];
-
-
-
-struct VGA_Other:
-
-// - pure data
-	Bit8u index;
-	Bit8u htotal;
-	Bit8u hdend;
-	Bit8u hsyncp;
-	Bit8u hsyncw;
-	Bit8u vtotal;
-	Bit8u vdend;
-	Bit8u vadjust;
-	Bit8u vsyncp;
-	Bit8u vsyncw;
-	Bit8u max_scanline;
-	Bit16u lightpen;
-	bool lightpen_triggered;
-	Bit8u cursor_start;
-	Bit8u cursor_end;
-*/

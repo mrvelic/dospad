@@ -25,7 +25,6 @@
 #include "dosbox.h"
 #include "bios.h"
 #include "mem.h"
-#include "../save_state.h"
 #include "regs.h"
 #include "dos_inc.h"
 #include "drives.h"
@@ -44,6 +43,8 @@
 Bitu DOS_FILES = 127;
 DOS_File ** Files = NULL;
 DOS_Drive * Drives[DOS_DRIVES] = {NULL};
+
+bool shiftjis_lead_byte(int c);
 
 Bit8u DOS_GetDefaultDrive(void) {
 //	return DOS_SDA(DOS_SDA_SEG,DOS_SDA_OFS).GetDrive();
@@ -92,12 +93,17 @@ bool DOS_MakeName(char const * const name,char * const fullname,Bit8u * drive) {
 			break;
 		default:
 			upname[w++]=c;
+            if (IS_PC98_ARCH && shiftjis_lead_byte(c) && r<DOS_PATHLENGTH) {
+                /* The trailing byte is NOT ASCII and SHOULD NOT be converted to uppercase like ASCII */
+                upname[w++]=name_int[r++];
+            }
 			break;
 		}
 	}
 	while (r>0 && name_int[r-1]==' ') r--;
 	if (r>=DOS_PATHLENGTH) { DOS_SetError(DOSERR_PATH_NOT_FOUND);return false; }
 	upname[w]=0;
+
 	/* Now parse the new file name to make the final filename */
 	if (upname[0]!='\\') strcpy(fullname,Drives[*drive]->curdir);
 	else fullname[0]=0;
@@ -301,6 +307,7 @@ bool DOS_Rename(char const * const oldname,char const * const newname) {
 }
 
 bool DOS_FindFirst(char * search,Bit16u attr,bool fcb_findfirst) {
+	LOG(LOG_FILES,LOG_NORMAL)("file search attributes %X name %s",attr,search);
 	DOS_DTA dta(dos.dta());
 	Bit8u drive;char fullsearch[DOS_PATHLENGTH];
 	char dir[DOS_PATHLENGTH];char pattern[DOS_PATHLENGTH];
@@ -357,7 +364,7 @@ bool DOS_FindNext(void) {
 
 
 bool DOS_ReadFile(Bit16u entry,Bit8u * data,Bit16u * amount) {
-#ifdef WIN32
+#if defined(WIN32) && !defined(__MINGW32__)
 	if(Network_IsActiveResource(entry))
 		return Network_ReadFile(entry,data,amount);
 #endif
@@ -383,7 +390,7 @@ bool DOS_ReadFile(Bit16u entry,Bit8u * data,Bit16u * amount) {
 }
 
 bool DOS_WriteFile(Bit16u entry,Bit8u * data,Bit16u * amount) {
-#ifdef WIN32
+#if defined(WIN32) && !defined(__MINGW32__)
 	if(Network_IsActiveResource(entry))
 		return Network_WriteFile(entry,data,amount);
 #endif
@@ -440,7 +447,7 @@ bool DOS_LockFile(Bit16u entry,Bit8u mode,Bit32u pos,Bit32u size) {
 }
 
 bool DOS_CloseFile(Bit16u entry) {
-#ifdef WIN32
+#if defined(WIN32) && !defined(__MINGW32__)
 	if(Network_IsActiveResource(entry))
 		return Network_CloseFile(entry);
 #endif
@@ -542,12 +549,12 @@ bool DOS_CreateFile(char const * name,Bit16u attributes,Bit16u * entry) {
 }
 
 bool DOS_OpenFile(char const * name,Bit8u flags,Bit16u * entry) {
-#ifdef WIN32
+#if defined(WIN32) && !defined(__MINGW32__)
 	if(Network_IsNetworkResource(const_cast<char *>(name)))
 		return Network_OpenFile(const_cast<char *>(name),flags,entry);
 #endif
 	/* First check for devices */
-	if (flags>2) LOG(LOG_FILES,LOG_ERROR)("Special file open command %X file %s",flags,name);
+	if (flags>2) LOG(LOG_FILES,LOG_NORMAL)("Special file open command %X file %s",flags,name); // FIXME: Why? Is there something about special opens DOSBox doesn't handle properly?
 	else LOG(LOG_FILES,LOG_NORMAL)("file open command %X file %s",flags,name);
 
 	DOS_PSP psp(dos.psp());
@@ -661,6 +668,11 @@ bool DOS_OpenFileExtended(char const * name, Bit16u flags, Bit16u createAttr, Bi
 
 bool DOS_UnlinkFile(char const * const name) {
 	char fullname[DOS_PATHLENGTH];Bit8u drive;
+	// An existing device returns an access denied error
+	if (DOS_FindDevice(name) != DOS_DEVICES) {
+		DOS_SetError(DOSERR_ACCESS_DENIED);
+		return false;
+	}
 	if (!DOS_MakeName(name,fullname,&drive)) return false;
 	if(Drives[drive]->FileUnlink(fullname)){
 		return true;
@@ -856,8 +868,8 @@ Bit8u FCB_Parsename(Bit16u seg,Bit16u offset,Bit8u parser ,char *string, Bit8u *
 	if (string[1]==':') {
 		fcb_name.part.drive[0]=0;
 		hasdrive=true;
-		if (isalpha(string[0]) && Drives[toupper(string[0])-'A']) {
-			fcb_name.part.drive[0]=(char)(toupper(string[0])-'A'+1);
+		if (isalpha(string[0]) && Drives[ascii_toupper(string[0])-'A']) {
+			fcb_name.part.drive[0]=(char)(ascii_toupper(string[0])-'A'+1);
 		} else ret=0xff;
 		string+=2;
 	}
@@ -885,7 +897,19 @@ Bit8u FCB_Parsename(Bit16u seg,Bit16u offset,Bit8u parser ,char *string, Bit8u *
 		if (!finished) {
 			if (string[0]=='*') {fill='?';fcb_name.part.name[index]='?';if (!ret) ret=1;finished=true;}
 			else if (string[0]=='?') {fcb_name.part.name[index]='?';if (!ret) ret=1;}
-			else if (isvalid(string[0])) {fcb_name.part.name[index]=(char)(toupper(string[0]));}
+            else if (IS_PC98_ARCH && shiftjis_lead_byte(string[0])) {
+                /* Shift-JIS is NOT ASCII and SHOULD NOT be converted to uppercase like ASCII */
+                fcb_name.part.name[index]=string[0];
+                string++;
+                index++;
+                if (index >= 8) break;
+
+                /* should be trailing byte of Shift-JIS */
+                if ((unsigned char)string[0] < 32 || (unsigned char)string[0] >= 127) continue;
+
+                fcb_name.part.name[index]=string[0];
+            }
+			else if (isvalid(string[0])) {fcb_name.part.name[index]=(char)(ascii_toupper(string[0]));}
 			else { finished=true;continue; }
 			string++;
 		} else {
@@ -902,7 +926,19 @@ checkext:
 		if (!finished) {
 			if (string[0]=='*') {fill='?';fcb_name.part.ext[index]='?';finished=true;}
 			else if (string[0]=='?') {fcb_name.part.ext[index]='?';if (!ret) ret=1;}
-			else if (isvalid(string[0])) {fcb_name.part.ext[index]=(char)(toupper(string[0]));}
+			else if (isvalid(string[0])) {fcb_name.part.ext[index]=(char)(ascii_toupper(string[0]));}
+            else if (IS_PC98_ARCH && shiftjis_lead_byte(string[0])) {
+                /* Shift-JIS is NOT ASCII and SHOULD NOT be converted to uppercase like ASCII */
+                fcb_name.part.ext[index]=string[0];
+                string++;
+                index++;
+                if (index >= 3) break;
+
+                /* should be trailing byte of Shift-JIS */
+                if ((unsigned char)string[0] < 32 || (unsigned char)string[0] >= 127) continue;
+
+                fcb_name.part.ext[index]=string[0];
+            }
 			else { finished=true;continue; }
 			string++;
 		} else {
@@ -1185,6 +1221,7 @@ bool DOS_FCBGetFileSize(Bit16u seg,Bit16u offset) {
 	Bit32u size = 0;
 	Files[handle]->Seek(&size,DOS_SEEK_END);
 	DOS_CloseFile(entry);fcb.GetSeqData(handle,rec_size);
+	if (rec_size == 0) rec_size = 128; //Use default if missing.
 	Bit32u random=(size/rec_size);
 	if (size % rec_size) random++;
 	fcb.SetRandom(random);
@@ -1331,248 +1368,3 @@ void DOS_SetupFiles (void) {
 	Drives[25]=new Virtual_Drive();
 }
 
-
-
-void DOS_File::SaveState( std::ostream& stream )
-{
-	Bit32u file_namelen, seek_pos;
-
-
-	file_namelen = strlen( name )+1;
-	seek_pos = GetSeekPos();
-
-	//******************************************
-	//******************************************
-	//******************************************
-
-	// - pure data
-	WRITE_POD( &file_namelen, file_namelen );
-	WRITE_POD_SIZE( name, file_namelen );
-
-	WRITE_POD( &drive, drive );
-	WRITE_POD( &flags, flags );
-	WRITE_POD( &open, open );
-
-	WRITE_POD( &attr, attr );
-	WRITE_POD( &time, time );
-	WRITE_POD( &date, date );
-	WRITE_POD( &refCtr, refCtr );
-	WRITE_POD( &newtime, newtime );
-	WRITE_POD( &hdrive, hdrive );
-
-	//******************************************
-	//******************************************
-	//******************************************
-
-	// - reloc ptr
-	WRITE_POD( &seek_pos, seek_pos );
-}
-
-
-void DOS_File::LoadState( std::istream& stream )
-{
-	Bit32u file_namelen, seek_pos;
-	char *file_name;
-
-	//******************************************
-	//******************************************
-	//******************************************
-
-	// - pure data
-	READ_POD( &file_namelen, file_namelen );
-	file_name = (char*)alloca( file_namelen * sizeof(char) );
-	READ_POD_SIZE( file_name, file_namelen );
-
-	READ_POD( &drive, drive );
-	READ_POD( &flags, flags );
-	READ_POD( &open, open );
-
-	READ_POD( &attr, attr );
-	READ_POD( &time, time );
-	READ_POD( &date, date );
-	READ_POD( &refCtr, refCtr );
-	READ_POD( &newtime, newtime );
-	READ_POD( &hdrive, hdrive );
-
-	//******************************************
-	//******************************************
-	//******************************************
-
-	// - reloc ptr
-	READ_POD( &seek_pos, seek_pos );
-
-
-	if( open ) Seek( &seek_pos, DOS_SEEK_SET );
-	else Close();
-}
-
-
-void POD_Save_DOS_Files( std::ostream& stream )
-{
-	// 1. Do drives first (directories -> files)
-	// 2. Then files next
-
-	for( int lcv=0; lcv<DOS_DRIVES; lcv++ ) {
-		Bit8u drive_valid;
-
-		drive_valid = 0;
-		if( Drives[lcv] == 0 ) drive_valid = 0xff;
-
-		//**********************************************
-		//**********************************************
-		//**********************************************
-
-		// - reloc ptr
-		WRITE_POD( &drive_valid, drive_valid );
-
-		if( drive_valid == 0xff ) continue;
-		Drives[lcv]->SaveState(stream);
-	}
-
-	for( int lcv=0; lcv<DOS_FILES; lcv++ ) {
-		Bit8u file_valid;
-		char *file_name;
-		Bit8u file_namelen, file_drive, file_flags;
-
-		file_valid = 0;
-		if( Files[lcv] == 0 ) file_valid = 0xff;
-		else {
-			if( strcmp( Files[lcv]->GetName(), "CON" ) == 0 ) file_valid = 0xfe;
-			if( strcmp( Files[lcv]->GetName(), "PRN" ) == 0 ) file_valid = 0xfe;
-			if( strcmp( Files[lcv]->GetName(), "AUX" ) == 0 ) file_valid = 0xfe;
-		}
-
-		// - reloc ptr
-		WRITE_POD( &file_valid, file_valid );
-
-
-		// system files
-		if( file_valid == 0xff ) continue;
-		if( file_valid == 0xfe ) {
-			WRITE_POD( &Files[lcv]->refCtr, Files[lcv]->refCtr );
-			continue;
-		}
-
-		//**********************************************
-		//**********************************************
-		//**********************************************
-
-		file_namelen = strlen( Files[lcv]->name ) + 1;
-		file_name = (char *) alloca( file_namelen );
-		strcpy( file_name, Files[lcv]->name );
-
-		file_drive = Files[lcv]->GetDrive();
-		file_flags = Files[lcv]->flags;
-
-
-		// - Drives->FileOpen vars (repeat copy)
-		WRITE_POD( &file_namelen, file_namelen );
-		WRITE_POD_SIZE( file_name, file_namelen );
-
-		WRITE_POD( &file_drive, file_drive );
-		WRITE_POD( &file_flags, file_flags );
-
-
-		Files[lcv]->SaveState(stream);
-	}
-}
-
-void POD_Load_DOS_Files( std::istream& stream )
-{
-	// 1. Do drives first (directories -> files)
-	// 2. Then files next
-
-	for( int lcv=0; lcv<DOS_DRIVES; lcv++ ) {
-		Bit8u drive_valid;
-
-
-		// - reloc ptr
-		READ_POD( &drive_valid, drive_valid );
-		if( drive_valid == 0xff ) continue;
-
-
-		if( Drives[lcv] ) Drives[lcv]->LoadState(stream);
-	}
-
-
-	for( int lcv=0; lcv<DOS_FILES; lcv++ ) {
-		Bit8u file_valid;
-		char *file_name;
-		Bit8u file_namelen, file_drive, file_flags;
-
-
-		// - reloc ptr
-		READ_POD( &file_valid, file_valid );
-
-
-		// ignore system files
-		if( file_valid == 0xfe ) {
-			READ_POD( &Files[lcv]->refCtr, Files[lcv]->refCtr );
-			continue;
-		}
-
-
-		// shutdown old file
-		if( Files[lcv] ) {
-			if( Files[lcv]->IsOpen() ) Files[lcv]->Close();
-			if (Files[lcv]->RemoveRef()<=0) {
-				delete Files[lcv];
-			}
-			Files[lcv]=0;
-		}
-
-
-		// ignore NULL file
-		if( file_valid == 0xff ) continue;
-
-		//**********************************************
-		//**********************************************
-		//**********************************************
-
-		// - Drives->FileOpen vars (repeat copy)
-		READ_POD( &file_namelen, file_namelen );
-		file_name = (char *) alloca( file_namelen );
-		READ_POD_SIZE( file_name, file_namelen );
-
-		READ_POD( &file_drive, file_drive );
-		READ_POD( &file_flags, file_flags );
-
-
-		// NOTE: Must open regardless to get 'new' DOS_File class
-		if (file_drive != 255) Drives[file_drive]->FileOpen( &Files[lcv], file_name, file_flags );
-
-		if( Files[lcv] ) Files[lcv]->LoadState(stream);
-	}
-}
-
-
-
-/*
-ykhwong svn-daum 2012-02-20
-
-
-- reloc class 'new' data
-class DOS_File Files
-	// - pure data (NULL warning)
-	char* name;
-
-	// - pure data
-	Bit8u drive;
-	Bit32u flags;
-	bool open;
-
-	Bit16u attr;
-	Bit16u time;
-	Bit16u date;
-	Bits refCtr;
-	bool newtime;
-	Bit8u hdrive;
-
-
-
-- reloc class 'new' data
-class DOS_Drive *Drives[DOS_DRIVES];
-	// - pure data
-	char curdir[DOS_PATHLENGTH];
-	char info[256];
-*/

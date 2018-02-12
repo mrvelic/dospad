@@ -1,8 +1,8 @@
 #include "config.h"
 #include "logging.h"
 
-#if defined (_MSC_VER) 
-/*
+#if defined (_MSC_VER)
+# if defined (_M_IX86)/*x86 only*/
 void outportb(Bit32u portid, Bit8u value) {
   __asm mov edx,portid
   __asm mov al,value
@@ -47,9 +47,10 @@ Bit32u inportd(Bit32u portid) {
   __asm mov value,eax
   return value;
 }
-*/
+# endif
 #else
-/*void outportb(Bit32u portid, Bit8u value) {
+# if defined(__i386__) || defined(__amd64__) || defined(__x86_64__)
+void outportb(Bit32u portid, Bit8u value) {
    __asm__ volatile (
       "movl   %0,%%edx   \n"
       "movb   %1,%%al      \n"
@@ -70,10 +71,11 @@ Bit8u inportb(Bit32u portid) {
       :   "edx", "al", "memory"
    );
   return value;
-}*/
+}
+# endif
 #endif
 
-#ifdef WIN32
+#if defined(WIN32) && defined(_M_IX86)/*WIN32 x86 only*/
 
 // WIN specific
 #include "sdl.h"
@@ -229,6 +231,7 @@ bool setPermissionList() {
 #endif
 
 #ifdef LINUX
+# if defined(__i386__) || defined(__amd64__) || defined(__x86_64__)
 // This Linux ioperm only works up to port 0x3FF
 #include <sys/perm.h>
 
@@ -245,4 +248,6 @@ bool setPermissionList() {
 	return true;
 }
 
+# endif
 #endif
+

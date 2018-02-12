@@ -152,6 +152,12 @@ struct bootstrap {
 	Bit8u  bootcode[474];
 	Bit8u  magic1; /* 0x55 */
 	Bit8u  magic2; /* 0xaa */
+#ifndef SECTOR_SIZE_MAX
+# pragma warning SECTOR_SIZE_MAX not defined
+#endif
+#if SECTOR_SIZE_MAX > 512
+    Bit8u  extra[SECTOR_SIZE_MAX - 512];
+#endif
 } GCC_ATTRIBUTE(packed);
 
 struct direntry {
@@ -168,6 +174,8 @@ struct direntry {
 	Bit16u loFirstClust;
 	Bit32u entrysize;
 } GCC_ATTRIBUTE(packed);
+
+#define MAX_DIRENTS_PER_SECTOR (SECTOR_SIZE_MAX / sizeof(direntry))
 
 struct partTable {
 	Bit8u booter[446];
@@ -191,7 +199,9 @@ class imageDisk;
 class fatDrive : public DOS_Drive {
 public:
 	fatDrive(const char * sysFilename, Bit32u bytesector, Bit32u cylsector, Bit32u headscyl, Bit32u cylinders, Bit32u startSector);
-	virtual ~fatDrive();
+	fatDrive(imageDisk *sourceLoadedDisk, Bit32u bytesector, Bit32u cylsector, Bit32u headscyl, Bit32u cylinders, Bit32u startSector);
+    void fatDriveInit(const char *sysFilename, Bit32u bytesector, Bit32u cylsector, Bit32u headscyl, Bit32u cylinders, Bit32u startSector, Bit32u filesize);
+    virtual ~fatDrive();
 	virtual bool FileOpen(DOS_File * * file,const char * name,Bit32u flags);
 	virtual bool FileCreate(DOS_File * * file,const char * name,Bit16u attributes);
 	virtual bool FileUnlink(const char * name);
@@ -254,7 +264,7 @@ private:
 	Bit32u cwdDirCluster;
 	Bit32u dirPosition; /* Position in directory search */
 
-	Bit8u fatSectBuffer[1024];
+	Bit8u fatSectBuffer[SECTOR_SIZE_MAX * 2];
 	Bit32u curFatSect;
 };
 

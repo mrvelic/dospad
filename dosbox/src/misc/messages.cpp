@@ -70,6 +70,9 @@ void MSG_Replace(const char * _name, const char* _val) {
 void LoadMessageFile(const char * fname) {
 	if (!fname) return;
 	if(*fname=='\0') return;//empty string=no languagefile
+
+	LOG(LOG_MISC,LOG_DEBUG)("Loading message file %s",fname);
+
 	FILE * mfile=fopen(fname,"rt");
 	/* This should never happen and since other modules depend on this use a normal printf */
 	if (!mfile) {
@@ -135,12 +138,14 @@ bool MSG_Write(const char * location) {
 	return true;
 }
 
-void MSG_Init(Section_prop * section) {
-	std::string file_name;
-	if (control->cmdline->FindString("-lang",file_name,true)) {
-		LoadMessageFile(file_name.c_str());
-	} else {
+void MSG_Init() {
+	Section_prop *section=static_cast<Section_prop *>(control->GetSection("dosbox"));
+
+	if (control->opt_lang != "") {
+		LoadMessageFile(control->opt_lang.c_str());
+	}
+	else {
 		Prop_path* pathprop = section->Get_path("language");
-		if(pathprop) LoadMessageFile(pathprop->realpath.c_str());
+		if (pathprop != NULL) LoadMessageFile(pathprop->realpath.c_str());
 	}
 }

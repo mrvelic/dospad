@@ -2,6 +2,9 @@
 
 #if C_NE2000
 
+#if defined(WIN32)
+  #define HAVE_REMOTE
+#endif
 
 #include "dosbox.h"
 #include <string.h>
@@ -13,6 +16,8 @@
 #include "timer.h"
 #include "pic.h"
 #include "cpu.h"
+#include "setup.h"
+#include "control.h"
 
 /* Couldn't find a real spec for the NE2000 out there, hence this is adapted heavily from Bochs */
 
@@ -48,8 +53,6 @@
 
 #include "ne2000.h"
 
-#define HAVE_REMOTE
-
 #include "pcap.h"
 // Handle to WinPCap device
 pcap_t *adhandle = 0;
@@ -81,10 +84,26 @@ int (*PacketFindALlDevsEx)(char *, struct pcap_rmtauth *, pcap_if_t **, char *) 
 //#define BX_DEBUG 
 //#define BX_INFO 
 #define BX_NULL_TIMER_HANDLE 0
-#define BX_PANIC 
-#define BX_ERROR 
+//#define BX_PANIC 
+//#define BX_ERROR 
 #define BX_RESET_HARDWARE 0
 #define BX_RESET_SOFTWARE 1
+
+static inline void BX_INFO(const char *msg,...) {
+	/* TODO: #if DEBUG or such, to enable debugging messages */
+}
+
+static inline void BX_DEBUG(const char *msg,...) {
+	/* TODO: #if DEBUG or such, to enable debugging messages */
+}
+
+static inline void BX_ERROR(const char *msg,...) {
+	/* TODO: #if DEBUG or such, to enable debugging messages */
+}
+
+static inline void BX_PANIC(const char *msg,...) {
+	/* TODO: #if DEBUG or such, to enable debugging messages */
+}
 
 bx_ne2k_c* theNE2kDevice = NULL;
 
@@ -1203,7 +1222,7 @@ bx_ne2k_c::rx_frame(const void *buf, unsigned io_len)
   int pages;
   int avail;
   unsigned idx;
-  int wrapped;
+//  int wrapped;
   int nextpage;
   unsigned char pkthdr[4];
   unsigned char *pktbuf = (unsigned char *) buf;
@@ -1233,7 +1252,7 @@ bx_ne2k_c::rx_frame(const void *buf, unsigned io_len)
   } else {
     avail = (BX_NE2K_THIS s.page_stop - BX_NE2K_THIS s.page_start) -
       (BX_NE2K_THIS s.curr_page - BX_NE2K_THIS s.bound_ptr);
-    wrapped = 1;
+//    wrapped = 1;
   }
 
   // Avoid getting into a buffer overflow condition by not attempting
@@ -1507,7 +1526,7 @@ public:
 
 		// mac address
 		const char* macstring=section->Get_string("macaddr");
-		Bitu macint[6];
+		unsigned int macint[6];
 		Bit8u mac[6];
 		if(sscanf(macstring,"%02x:%02x:%02x:%02x:%02x:%02x",
 			&macint[0],&macint[1],&macint[2],&macint[3],&macint[4],&macint[5]) != 6) {
@@ -1524,7 +1543,7 @@ public:
 		pcap_if_t *alldevs;
 		pcap_if_t *currentdev = NULL;
 		char errbuf[PCAP_ERRBUF_SIZE];
-		Bitu userdev;
+		unsigned int userdev;
 #ifdef WIN32
 		if (pcap_findalldevs_ex(PCAP_SRC_IF_STRING, NULL, &alldevs, errbuf) == -1)
 #else
@@ -1543,7 +1562,7 @@ public:
 				const char* desc = "no description"; 
 				if(currentdev->description) desc=currentdev->description;
 				i++;
-				LOG_MSG("%2d. %s\n    (%s)\n",i,currentdev->name,desc);
+				LOG_MSG("%2d. %s\n    (%s)\n",(int)i,currentdev->name,desc);
 			}
 			pcap_freealldevs(alldevs);
 			load_success = false;
@@ -1642,24 +1661,41 @@ public:
 	}	
 };
 
-static NE2K* test;
+static NE2K* test = NULL;
+
 void NE2K_ShutDown(Section* sec) {
-	if(test) delete test;	
-	test=0;
+	if (test) {
+        delete test;	
+        test = NULL;
+    }
 }
 
-void NE2K_Init(Section* sec) {
-	test = new NE2K(sec);
-	sec->AddDestroyFunction(&NE2K_ShutDown,true);
-	if(!test->load_success) {
-		delete test;
-		test=0;
+void NE2k_OnEnterPC98(Section* sec) {
+	if (test) {
+        delete test;	
+        test = NULL;
+    }
+}
+
+void NE2K_OnReset(Section* sec) {
+	if (test == NULL) {
+		LOG(LOG_MISC,LOG_DEBUG)("Allocating NE2000 emulation");
+		test = new NE2K(control->GetSection("ne2000"));
+
+		if (!test->load_success) {
+			LOG(LOG_MISC,LOG_DEBUG)("Sorry, NE2000 allocation failed to load");
+			delete test;
+			test = NULL;
+		}
 	}
 }
 
+void NE2K_Init() {
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing NE2000 network card emulation");
 
-// save state support
-void *NE2000_TX_Event_PIC_Event = (void*)NE2000_TX_Event;
-void *NE2000_Poller_PIC_Event = (void*)NE2000_Poller;
+	AddExitFunction(AddExitFunctionFuncPair(NE2K_ShutDown),true);
+	AddVMEventFunction(VM_EVENT_RESET,AddVMEventFunctionFuncPair(NE2K_OnReset));
+    AddVMEventFunction(VM_EVENT_ENTER_PC98_MODE,AddVMEventFunctionFuncPair(NE2k_OnEnterPC98));
+}
 
 #endif // C_NE2000

@@ -24,7 +24,7 @@
 #include "joystick.h"
 #include "pic.h"
 #include "support.h"
-#include "../save_state.h"
+#include "control.h"
 
 #define RANGE 64
 #define TIMEOUT 10
@@ -145,6 +145,7 @@ static void write_p201_timed(Bitu port,Bitu val,Bitu iolen) {
 }
 
 void JOYSTICK_Enable(Bitu which,bool enabled) {
+	LOG(LOG_MISC,LOG_DEBUG)("JOYSTICK: Stick %u enable=%u",(int)which,enabled?1:0);
 	if (which<2) stick[which].enabled=enabled;
 }
 
@@ -191,6 +192,50 @@ private:
 public:
 	JOYSTICK(Section* configuration):Module_base(configuration){
 		Section_prop * section=static_cast<Section_prop *>(configuration);
+
+		bool timed = section->Get_bool("timed");
+		if(timed) {
+			ReadHandler.Install(0x201,read_p201_timed,IO_MB);
+			WriteHandler.Install(0x201,write_p201_timed,IO_MB);
+		} else {
+			ReadHandler.Install(0x201,read_p201,IO_MB);
+			WriteHandler.Install(0x201,write_p201,IO_MB);
+		}
+	}
+};
+
+static JOYSTICK* test = NULL;
+
+void JOYSTICK_Destroy(Section* sec) {
+    if (test != NULL) {
+        delete test;
+        test = NULL;
+    }
+}
+
+void JOYSTICK_OnPowerOn(Section* sec) {
+    if (test == NULL) {
+        LOG(LOG_MISC,LOG_DEBUG)("Allocating joystick emulation");
+        test = new JOYSTICK(control->GetSection("joystick"));
+    }
+}
+
+void JOYSTICK_OnEnterPC98(Section* sec) {
+    if (test != NULL) {
+        delete test;
+        test = NULL;
+    }
+}
+
+void JOYSTICK_Init() {
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing joystick emulation");
+
+	/* NTS: Joystick emulation does not work if we init joystick type AFTER mapper init.
+	 *      We cannot wait for poweron/reset signal for determination of joystick type.
+	 *      But, I/O port setup can happen later. */
+	{
+		Section_prop * section=static_cast<Section_prop *>(control->GetSection("joystick"));
+
 		const char * type=section->Get_string("joysticktype");
 		if (!strcasecmp(type,"none"))       joytype = JOY_NONE;
 		else if (!strcasecmp(type,"false")) joytype = JOY_NONE;
@@ -202,14 +247,6 @@ public:
 		else if (!strcasecmp(type,"ch"))    joytype = JOY_CH;
 		else joytype = JOY_AUTO;
 
-		bool timed = section->Get_bool("timed");
-		if(timed) {
-			ReadHandler.Install(0x201,read_p201_timed,IO_MB);
-			WriteHandler.Install(0x201,write_p201_timed,IO_MB);
-		} else {
-			ReadHandler.Install(0x201,read_p201,IO_MB);
-			WriteHandler.Install(0x201,write_p201,IO_MB);
-		}
 		autofire = section->Get_bool("autofire");
 		swap34 = section->Get_bool("swap34");
 		button_wrapping_enabled = section->Get_bool("buttonwrap");
@@ -218,35 +255,10 @@ public:
 		stick[0].xtick = stick[0].ytick = stick[1].xtick =
 		                 stick[1].ytick = PIC_FullIndex();
 	}
-};
-static JOYSTICK* test;
 
-void JOYSTICK_Destroy(Section* sec) {
-	delete test;
+	AddExitFunction(AddExitFunctionFuncPair(JOYSTICK_Destroy),true); 
+	AddVMEventFunction(VM_EVENT_POWERON,AddVMEventFunctionFuncPair(JOYSTICK_OnPowerOn));
+
+	AddVMEventFunction(VM_EVENT_ENTER_PC98_MODE,AddVMEventFunctionFuncPair(JOYSTICK_OnEnterPC98));
 }
 
-void JOYSTICK_Init(Section* sec) {
-	test = new JOYSTICK(sec);
-	sec->AddDestroyFunction(&JOYSTICK_Destroy,true); 
-}
-
-
-
-//save state support
-namespace
-{
-class SerializeStick : public SerializeGlobalPOD
-{
-public:
-    SerializeStick() : SerializeGlobalPOD("Joystick")
-    {
-        registerPOD(joytype);
-        registerPOD(stick);
-        registerPOD(last_write);
-        registerPOD(write_active);
-        registerPOD(swap34);
-        registerPOD(button_wrapping_enabled);
-        registerPOD(autofire);
-    }
-} dummy;
-}

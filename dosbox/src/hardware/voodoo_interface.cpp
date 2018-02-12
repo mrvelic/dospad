@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2002-2011  The DOSBox Team
+ *  Copyright (C) 2002-2013  The DOSBox Team
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -48,7 +48,11 @@ void Voodoo_PageHandler::writeb(PhysPt addr,Bitu val) {
 
 Bitu Voodoo_PageHandler::readw(PhysPt addr) {
 	addr = PAGING_GetPhysicalAddress(addr);
-	if (addr&1) E_Exit("voodoo readw unaligned");
+    if (addr&1) {
+        LOG_MSG("voodoo readw unaligned");
+        return (Bitu)-1;
+    }
+
 	Bitu retval=voodoo_r((addr>>2)&0x3FFFFF);
 	if (addr&3)
 		retval >>= 16;
@@ -59,7 +63,11 @@ Bitu Voodoo_PageHandler::readw(PhysPt addr) {
 
 void Voodoo_PageHandler::writew(PhysPt addr,Bitu val) {
 	addr = PAGING_GetPhysicalAddress(addr);
-	if (addr&1) E_Exit("voodoo writew unaligned");
+	if (addr&1) {
+        LOG_MSG("voodoo writew unaligned");
+        return;
+    }
+
 	if (addr&3)
 		voodoo_w((addr>>2)&0x3FFFFF,val<<16,0xffff0000);
 	else
@@ -76,7 +84,7 @@ Bitu Voodoo_PageHandler::readd(PhysPt addr) {
 			Bitu high = voodoo_r(((addr>>2)+1)&0x3FFFFF);
 			return (low>>16) | (high<<16);
 		} else {
-			E_Exit("voodoo readd unaligned");
+			LOG_MSG("voodoo readd unaligned");
 		}
 	}
 	return 0xffffffff;
@@ -89,7 +97,7 @@ void Voodoo_PageHandler::writed(PhysPt addr,Bitu val) {
 	} else {
 		if (!(addr&1)) {
 			voodoo_w((addr>>2)&0x3FFFFF,val<<16,0xffff0000);
-			voodoo_w(((addr>>2)+1)&0x3FFFFF,val,0x0000ffff);
+			voodoo_w(((addr>>2)+1)&0x3FFFFF,val>>16,0x0000ffff);
 		} else {
 			Bit32u val1 = voodoo_r((addr>>2)&0x3FFFFF);
 			Bit32u val2 = voodoo_r(((addr>>2)+1)&0x3FFFFF);
@@ -250,7 +258,6 @@ void Voodoo_Output_Enable(bool enabled) {
 	}
 }
 
-
 void Voodoo_Initialize(Bits emulation_type, Bits card_type, bool max_voodoomem) {
 	if ((emulation_type <= 0) || (emulation_type > 2)) return;
 
@@ -277,7 +284,8 @@ void Voodoo_Initialize(Bits emulation_type, Bits card_type, bool max_voodoomem) 
 	v->ogl = false;
 	extern bool OpenGL_using(void);
 	if (emulation_type == 2) v->ogl = OpenGL_using();
-	LOG_MSG("voodoo: ogl=%u",v->ogl);
+
+	LOG(LOG_VOODOO,LOG_DEBUG)("voodoo: ogl=%u",v->ogl);
 
 	vdraw.vfreq = 1000.0f/60.0f;
 
@@ -303,9 +311,7 @@ void Voodoo_PCI_InitEnable(Bitu val) {
 
 void Voodoo_PCI_Enable(bool enable) {
 	v->clock_enabled = enable;
-	CPU_Core_Dyn_X86_SaveDHFPUState();
 	Voodoo_UpdateScreenStart();
-	CPU_Core_Dyn_X86_RestoreDHFPUState();
 }
 
 PageHandler* Voodoo_GetPageHandler() {

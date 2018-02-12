@@ -29,7 +29,6 @@
 #include "cpu.h"
 
 #include "cdrom.h"
-#include "../save_state.h"
 
 #define MSCDEX_LOG LOG(LOG_MISC,LOG_ERROR)
 //#define MSCDEX_LOG
@@ -158,7 +157,7 @@ public:
 
 	Bit16u				defaultBufSeg;
 	TDriveInfo			dinfo[MSCDEX_MAX_DRIVES];
-	CDROM_Interface*	cdrom[MSCDEX_MAX_DRIVES];
+	CDROM_Interface*		cdrom[MSCDEX_MAX_DRIVES];
 	
 public:
 	Bit16u		rootDriverHeaderSeg;
@@ -267,26 +266,26 @@ int CMscdex::AddDrive(Bit16u _drive, char* physicalPath, Bit8u& subUnit)
 		if ((osi.dwPlatformId==VER_PLATFORM_WIN32_NT) && (osi.dwMajorVersion>4)) {
 			// only WIN NT/200/XP
 			if (useCdromInterface==CDROM_USE_IOCTL_DIO) {
-				cdrom[numDrives] = new CDROM_Interface_Ioctl(CDROM_Interface_Ioctl::CDIOCTL_CDA_DIO);
-				LOG(LOG_MISC,LOG_NORMAL)("MSCDEX: IOCTL Interface.");
-				break;
+//				cdrom[numDrives] = new CDROM_Interface_Ioctl(CDROM_Interface_Ioctl::CDIOCTL_CDA_DIO);
+//				LOG(LOG_MISC,LOG_NORMAL)("MSCDEX: IOCTL Interface.");
+//				break;
 			}
 			if (useCdromInterface==CDROM_USE_IOCTL_DX) {
-				cdrom[numDrives] = new CDROM_Interface_Ioctl(CDROM_Interface_Ioctl::CDIOCTL_CDA_DX);
-				LOG(LOG_MISC,LOG_NORMAL)("MSCDEX: IOCTL Interface (digital audio extraction).");
-				break;
+//				cdrom[numDrives] = new CDROM_Interface_Ioctl(CDROM_Interface_Ioctl::CDIOCTL_CDA_DX);
+//				LOG(LOG_MISC,LOG_NORMAL)("MSCDEX: IOCTL Interface (digital audio extraction).");
+//				break;
 			}
 			if (useCdromInterface==CDROM_USE_IOCTL_MCI) {
-				cdrom[numDrives] = new CDROM_Interface_Ioctl(CDROM_Interface_Ioctl::CDIOCTL_CDA_MCI);
-				LOG(LOG_MISC,LOG_NORMAL)("MSCDEX: IOCTL Interface (media control interface).");
-				break;
+//				cdrom[numDrives] = new CDROM_Interface_Ioctl(CDROM_Interface_Ioctl::CDIOCTL_CDA_MCI);
+//				LOG(LOG_MISC,LOG_NORMAL)("MSCDEX: IOCTL Interface (media control interface).");
+//				break;
 			}
 		}
 		if (useCdromInterface==CDROM_USE_ASPI) {
 			// all Wins - ASPI
-			cdrom[numDrives] = new CDROM_Interface_Aspi();
-			LOG(LOG_MISC,LOG_NORMAL)("MSCDEX: ASPI Interface.");
-			break;
+//			cdrom[numDrives] = new CDROM_Interface_Aspi();
+//			LOG(LOG_MISC,LOG_NORMAL)("MSCDEX: ASPI Interface.");
+//			break;
 		}
 #endif
 #if defined (LINUX) || defined(OS2)
@@ -508,21 +507,16 @@ bool CMscdex::GetAudioStatus(Bit8u subUnit, bool& playing, bool& pause, TMSF& st
 	if (subUnit>=numDrives) return false;
 	dinfo[subUnit].lastResult = cdrom[subUnit]->GetAudioStatus(playing,pause);
 	if (dinfo[subUnit].lastResult) {
-		if (playing) {
-			// Start
-			Bit32u addr	= dinfo[subUnit].audioStart + 150;
-			start.fr	= (Bit8u)(addr%75);	addr/=75;
-			start.sec	= (Bit8u)(addr%60); 
-			start.min	= (Bit8u)(addr/60);
-			// End
-			addr		= dinfo[subUnit].audioEnd + 150;
-			end.fr		= (Bit8u)(addr%75);	addr/=75;
-			end.sec		= (Bit8u)(addr%60); 
-			end.min		= (Bit8u)(addr/60);
-		} else {
-			memset(&start,0,sizeof(start));
-			memset(&end,0,sizeof(end));
-		}
+		// Start
+		Bit32u addr	= dinfo[subUnit].audioStart + 150;
+		start.fr	= (Bit8u)(addr%75);	addr/=75;
+		start.sec	= (Bit8u)(addr%60); 
+		start.min	= (Bit8u)(addr/60);
+		// End
+		addr		= dinfo[subUnit].audioEnd + 150;
+		end.fr		= (Bit8u)(addr%75);	addr/=75;
+		end.sec		= (Bit8u)(addr%60); 
+		end.min		= (Bit8u)(addr/60);
 	} else {
 		playing		= false;
 		pause		= false;
@@ -937,6 +931,11 @@ static PhysPt curReqheaderPtr = 0;
 bool GetMSCDEXDrive(unsigned char drive_letter,CDROM_Interface **_cdrom) {
 	Bitu i;
 
+	if (mscdex == NULL) {
+		if (_cdrom) *_cdrom = NULL;
+		return false;
+	}
+
 	for (i=0;i < MSCDEX_MAX_DRIVES;i++) {
 		if (mscdex->cdrom[i] == NULL) continue;
 		if (mscdex->dinfo[i].drive == drive_letter) {
@@ -950,7 +949,7 @@ bool GetMSCDEXDrive(unsigned char drive_letter,CDROM_Interface **_cdrom) {
 
 static Bit16u MSCDEX_IOCTL_Input(PhysPt buffer,Bit8u drive_unit) {
 	Bitu ioctl_fct = mem_readb(buffer);
-	MSCDEX_LOG("MSCDEX: IOCTL INPUT Subfunction %02X",ioctl_fct);
+	MSCDEX_LOG("MSCDEX: IOCTL INPUT Subfunction %02X",(int)ioctl_fct);
 	switch (ioctl_fct) {
 		case 0x00 : /* Get Device Header address */
 					mem_writed(buffer+1,RealMake(mscdex->rootDriverHeaderSeg,0));
@@ -1059,7 +1058,7 @@ static Bit16u MSCDEX_IOCTL_Input(PhysPt buffer,Bit8u drive_unit) {
 					mem_writeb(buffer+10,0x00);
 					break;
 				   };
-		default :	LOG(LOG_MISC,LOG_ERROR)("MSCDEX: Unsupported IOCTL INPUT Subfunction %02X",ioctl_fct);
+		default :	LOG(LOG_MISC,LOG_ERROR)("MSCDEX: Unsupported IOCTL INPUT Subfunction %02X",(int)ioctl_fct);
 					return 0x03;	// invalid function
 	}
 	return 0x00;	// success
@@ -1090,7 +1089,7 @@ static Bit16u MSCDEX_IOCTL_Optput(PhysPt buffer,Bit8u drive_unit) {
 		case 0x05 :	// load media
 					if (!mscdex->LoadUnloadMedia(drive_unit,false)) return 0x02;
 					break;
-		default	:	LOG(LOG_MISC,LOG_ERROR)("MSCDEX: Unsupported IOCTL OUTPUT Subfunction %02X",ioctl_fct);
+		default	:	LOG(LOG_MISC,LOG_ERROR)("MSCDEX: Unsupported IOCTL OUTPUT Subfunction %02X",(int)ioctl_fct);
 					return 0x03;	// invalid function
 	}
 	return 0x00;	// success
@@ -1174,6 +1173,7 @@ static Bitu MSCDEX_Interrupt_Handler(void) {
 static bool MSCDEX_Handler(void) {
 	if(reg_ah == 0x11) {
 		if(reg_al == 0x00) { 
+			if (mscdex->rootDriverHeaderSeg==0) return false;
 			PhysPt check = PhysMake(SegValue(ss),reg_sp);
 			if(mem_readw(check+6) == 0xDADA) {
 				//MSCDEX sets word on stack to ADAD if it DADA on entry.
@@ -1190,9 +1190,10 @@ static bool MSCDEX_Handler(void) {
 	}
 
 	if (reg_ah!=0x15) return false;		// not handled here, continue chain
+	if (mscdex->rootDriverHeaderSeg==0) return false;	// not handled if MSCDEX not installed
 
 	PhysPt data = PhysMake(SegValue(es),reg_bx);
-	MSCDEX_LOG("MSCDEX: INT 2F %04X BX= %04X CX=%04X",reg_ax,reg_bx,reg_cx);
+	MSCDEX_LOG("MSCDEX: INT 2F AX=%04X BX=%04X CX=%04X",reg_ax,reg_bx,reg_cx);
 	switch (reg_ax) {
 	
 		case 0x1500:	/* Install check */
@@ -1303,7 +1304,7 @@ static bool MSCDEX_Handler(void) {
 						}
 						return true;
 	};
-	LOG(LOG_MISC,LOG_ERROR)("MSCDEX: Unknwon call : %04X",reg_ax);
+	LOG(LOG_MISC,LOG_ERROR)("MSCDEX: Unknown call : %04X",reg_ax);
 	return true;
 }
 
@@ -1397,95 +1398,43 @@ void MSCDEX_SetCDInterface(int intNr, int numCD) {
 }
 
 void MSCDEX_ShutDown(Section* /*sec*/) {
-	delete mscdex;
-	mscdex = 0;
+	if (mscdex != NULL) {
+		delete mscdex;
+		mscdex = NULL;
+	}
+
 	curReqheaderPtr = 0;
 }
 
-void MSCDEX_Init(Section* sec) {
-	// AddDestroy func
-	sec->AddDestroyFunction(&MSCDEX_ShutDown);
-	/* Register the mscdex device */
-	DOS_Device * newdev = new device_MSCDEX();
-	DOS_AddDevice(newdev);
+/* HACK: The IDE emulation is messily tied into calling MSCDEX.EXE!
+ *       We cannot shut down the mscdex object when booting into a guest OS!
+ *       Need to fix this, this is backwards! */
+void MSCDEX_DOS_ShutDown(Section* /*sec*/) {
 	curReqheaderPtr = 0;
-	/* Add Multiplexer */
-	DOS_AddMultiplexHandler(MSCDEX_Handler);
-	/* Create MSCDEX */
-	mscdex = new CMscdex;
 }
 
+void MSCDEX_Startup(Section* sec) {
+	if (mscdex == NULL) {
+		LOG(LOG_MISC,LOG_DEBUG)("Allocating MSCDEX.EXE emulation");
 
-
-//save state support
-void CMscdex::SaveState( std::ostream& stream )
-{
-	// - pure data
-	WRITE_POD( &defaultBufSeg, defaultBufSeg );
-	WRITE_POD( &rootDriverHeaderSeg, rootDriverHeaderSeg );
-}
-
-
-void CMscdex::LoadState( std::istream& stream )
-{
-	// - pure data
-	READ_POD( &defaultBufSeg, defaultBufSeg );
-	READ_POD( &rootDriverHeaderSeg, rootDriverHeaderSeg );
-}
-
-
-void POD_Save_DOS_Mscdex( std::ostream& stream )
-{
-	for (Bit8u drive_unit=0; drive_unit<mscdex->GetNumDrives(); drive_unit++) {
-		TMSF pos, start, end;
-		bool playing, pause;
-
-		mscdex->GetAudioStatus(drive_unit, playing, pause, start, end);
-		mscdex->GetCurrentPos(drive_unit,pos);
-
-
-		WRITE_POD( &playing, playing );
-		WRITE_POD( &pause, pause );
-		WRITE_POD( &pos, pos );
-		WRITE_POD( &start, start );
-		WRITE_POD( &end, end );
+		/* Register the mscdex device */
+		DOS_Device * newdev = new device_MSCDEX();
+		DOS_AddDevice(newdev);
+		curReqheaderPtr = 0;
+		/* Add Multiplexer */
+		DOS_AddMultiplexHandler(MSCDEX_Handler);
+		/* Create MSCDEX */
+		mscdex = new CMscdex;
 	}
-
-
-	mscdex->SaveState(stream);
 }
 
+void MSCDEX_Init() {
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing MSCDEX.EXE emulation");
 
-void POD_Load_DOS_Mscdex( std::istream& stream )
-{
-	for (Bit8u drive_unit=0; drive_unit<mscdex->GetNumDrives(); drive_unit++) {
-		TMSF pos, start, end;
-		Bit32u msf_time, play_len;
-		bool playing, pause;
-				
+	AddExitFunction(AddExitFunctionFuncPair(MSCDEX_ShutDown));
 
-		READ_POD( &playing, playing );
-		READ_POD( &pause, pause );
-		READ_POD( &pos, pos );
-		READ_POD( &start, start );
-		READ_POD( &end, end );
-
-
-		// end = total play time (GetAudioStatus adds +150)
-		// pos = current play cursor
-		// start = start play cursor
-		play_len = end.min * 75 * 60 + ( end.sec * 75 ) + end.fr - 150;
-		play_len -= ( pos.min - start.min ) * 75 * 60 + ( pos.sec - start.sec ) * 75 + ( pos.fr - start.fr );
-		msf_time = ( pos.min << 16 ) + ( pos.sec << 8 ) + ( pos.fr );
-
-
-		// first play, then simulate pause
-		mscdex->StopAudio(drive_unit);
-
-		if( playing ) mscdex->PlayAudioMSF(drive_unit, msf_time, play_len);
-		if( pause ) mscdex->PlayAudioMSF(drive_unit, msf_time, 0);
-	}
-
-
-	mscdex->LoadState(stream);
+	/* in any event that the DOS kernel is shutdown or abruptly wiped from memory */
+	AddVMEventFunction(VM_EVENT_RESET,AddVMEventFunctionFuncPair(MSCDEX_ShutDown));
+	AddVMEventFunction(VM_EVENT_DOS_EXIT_BEGIN,AddVMEventFunctionFuncPair(MSCDEX_DOS_ShutDown));
 }
+

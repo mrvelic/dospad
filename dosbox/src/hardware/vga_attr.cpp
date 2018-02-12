@@ -20,7 +20,6 @@
 #include "dosbox.h"
 #include "inout.h"
 #include "vga.h"
-#include "../save_state.h"
 
 #define attr(blah) vga.attr.blah
 
@@ -77,18 +76,20 @@ void VGA_ATTR_SetPalette(Bit8u index, Bit8u val) {
 	val &= 63; 
 	vga.attr.palette[index] = val;
 
-	// apply the plane mask
-	val = vga.attr.palette[index & vga.attr.color_plane_enable];
+    if (!IS_EGA_ARCH) {
+        // apply the plane mask
+        val = vga.attr.palette[index & vga.attr.color_plane_enable];
 
-	// replace bits 4-5 if configured
-	if (vga.attr.mode_control & 0x80)
-		val = (val&0xf) | (vga.attr.color_select << 4);
+        // replace bits 4-5 if configured
+        if (vga.attr.mode_control & 0x80)
+            val = (val&0xf) | (vga.attr.color_select << 4);
 
-	// set bits 6 and 7 (not relevant for EGA)
-	val |= (vga.attr.color_select & 0xc) << 4;
+        // set bits 6 and 7 (not relevant for EGA)
+        val |= (vga.attr.color_select & 0xc) << 4;
 
-	// apply
-	VGA_DAC_CombineColor(index,val);
+        // apply
+        VGA_DAC_CombineColor(index,val);
+    }
 }
 
 Bitu read_p3c0(Bitu /*port*/,Bitu /*iolen*/) {
@@ -296,44 +297,10 @@ void VGA_SetupAttr(void) {
 	}
 }
 
-
-
-// save state support
-void POD_Save_VGA_Attr( std::ostream& stream )
-{
-	// - pure struct data
-	WRITE_POD( &vga.attr, vga.attr );
-
-
-	// no static globals found
+void VGA_UnsetupAttr(void) {
+    IO_FreeWriteHandler(0x3c0,IO_MB);
+    IO_FreeReadHandler(0x3c0,IO_MB);
+    IO_FreeWriteHandler(0x3c1,IO_MB);
+    IO_FreeReadHandler(0x3c1,IO_MB);
 }
 
-
-void POD_Load_VGA_Attr( std::istream& stream )
-{
-	// - pure struct data
-	READ_POD( &vga.attr, vga.attr );
-
-
-	// no static globals found
-}
-
-
-/*
-ykhwong svn-daum 2012-02-20
-
-static globals: none
-
-
-struct VGA_Attr:
-
-// - pure data
-	Bit8u palette[16];
-	Bit8u mode_control;
-	Bit8u horizontal_pel_panning;
-	Bit8u overscan_color;
-	Bit8u color_plane_enable;
-	Bit8u color_select;
-	Bit8u index;
-	Bit8u disabled;
-*/

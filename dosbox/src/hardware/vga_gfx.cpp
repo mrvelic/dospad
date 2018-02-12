@@ -20,7 +20,6 @@
 #include "dosbox.h"
 #include "inout.h"
 #include "vga.h"
-#include "../save_state.h"
 
 #define gfx(blah) vga.gfx.blah
 static bool index9warned=false;
@@ -170,6 +169,11 @@ static void write_p3cf(Bitu port,Bitu val,Bitu iolen) {
 	case 8: /* Bit Mask Register */
 		gfx(bit_mask)=val;
 		vga.config.full_bit_mask=ExpandTable[val];
+
+		/* check for unusual use of the bit mask register in chained 320x200x256 mode and switch to the slow & accurate emulation */
+		if (vga.mode == M_VGA && vga.config.chained)
+			VGA_SetupHandlers();
+
 //		LOG_DEBUG("Bit mask %2X",val);
 		/*
 			0-7	Each bit if set enables writing to the corresponding bit of a byte in
@@ -182,11 +186,11 @@ static void write_p3cf(Bitu port,Bitu val,Bitu iolen) {
 			break;
 		}
 		if (gfx(index) == 9 && !index9warned) {
-			LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:3CF:Write %2X to illegal index 9",val);
+			LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:3CF:Write %2X to illegal index 9",(int)val);
 			index9warned=true;
 			break;
 		}
-		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:3CF:Write %2X to illegal index %2X",val,gfx(index));
+		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:3CF:Write %2X to illegal index %2X",(int)val,(int)gfx(index));
 		break;
 	}
 }
@@ -214,7 +218,7 @@ static Bitu read_p3cf(Bitu port,Bitu iolen) {
 	default:
 		if (svga.read_p3cf)
 			return svga.read_p3cf(gfx(index), iolen);
-		LOG(LOG_VGAMISC,LOG_NORMAL)("Reading from illegal index %2X in port %4X",static_cast<Bit32u>(gfx(index)),port);
+		LOG(LOG_VGAMISC,LOG_NORMAL)("Reading from illegal index %2X in port %4X",(int)static_cast<Bit32u>(gfx(index)),(int)port);
 		break;
 	}
 	return 0;	/* Compiler happy */
@@ -233,58 +237,10 @@ void VGA_SetupGFX(void) {
 	}
 }
 
-
-
-// save state support
-
-void POD_Save_VGA_Gfx( std::ostream& stream )
-{
-	// - pure struct data
-	WRITE_POD( &vga.gfx, vga.gfx );
-
-	//*******************************************
-	//*******************************************
-
-	// - system data
-	//WRITE_POD( &index9warned, index9warned );
+void VGA_UnsetupGFX(void) {
+    IO_FreeWriteHandler(0x3ce,IO_MB);
+    IO_FreeReadHandler(0x3ce,IO_MB);
+    IO_FreeWriteHandler(0x3cf,IO_MB);
+    IO_FreeReadHandler(0x3cf,IO_MB);
 }
 
-
-void POD_Load_VGA_Gfx( std::istream& stream )
-{
-	// - pure struct data
-	READ_POD( &vga.gfx, vga.gfx );
-
-	//*******************************************
-	//*******************************************
-
-	// - system data
-	//READ_POD( &index9warned, index9warned );
-}
-
-
-/*
-ykhwong svn-daum 2012-02-20
-
-static globals:
-
-// - system data
-static bool index9warned=false;
-
-
-
-struct VGA_Gfx:
-	
-// - pure data
-typedef struct {
-	Bit8u index;
-	Bit8u set_reset;
-	Bit8u enable_set_reset;
-	Bit8u color_compare;
-	Bit8u data_rotate;
-	Bit8u read_map_select;
-	Bit8u mode;
-	Bit8u miscellaneous;
-	Bit8u color_dont_care;
-	Bit8u bit_mask;
-*/

@@ -201,7 +201,7 @@ l_M_Ed:
 		case 0:
 			break;
 		default:
-			LOG(LOG_CPU,LOG_ERROR)("MODRM:Unhandled load %d entry %x",inst.code.extra,inst.entry);
+			LOG(LOG_CPU,LOG_ERROR)("MODRM:Unhandled load %d entry %lx",inst.code.extra,(unsigned long)inst.entry);
 			break;
 		}
 		break;
@@ -342,27 +342,61 @@ l_M_Ed:
 		#include "string.h"
 		goto nextopcode;
 	case D_PUSHAw:
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_80186) goto illegalopcode;
 		{
-			Bit16u old_sp=reg_sp;
-			Push_16(reg_ax);Push_16(reg_cx);Push_16(reg_dx);Push_16(reg_bx);
-			Push_16(old_sp);Push_16(reg_bp);Push_16(reg_si);Push_16(reg_di);
-		}
-		goto nextopcode;
+			Bitu old_esp = reg_esp;
+			try {
+				Bit16u old_sp = (CPU_ArchitectureType >= CPU_ARCHTYPE_286 ? reg_sp : (reg_sp-10));
+				Push_16(reg_ax);Push_16(reg_cx);Push_16(reg_dx);Push_16(reg_bx);
+				Push_16(old_sp);Push_16(reg_bp);Push_16(reg_si);Push_16(reg_di);
+			}
+			catch (GuestPageFaultException &pf) {
+				LOG_MSG("PUSHA interrupted by page fault");
+				reg_esp = old_esp;
+				throw;
+			}
+		} goto nextopcode;
 	case D_PUSHAd:
 		{
-			Bit32u old_esp=reg_esp;
-			Push_32(reg_eax);Push_32(reg_ecx);Push_32(reg_edx);Push_32(reg_ebx);
-			Push_32(old_esp);Push_32(reg_ebp);Push_32(reg_esi);Push_32(reg_edi);
-		}
-		goto nextopcode;
+			Bitu old_esp = reg_esp;
+			try {
+				Bitu tmpesp = reg_esp;
+				Push_32(reg_eax);Push_32(reg_ecx);Push_32(reg_edx);Push_32(reg_ebx);
+				Push_32(tmpesp);Push_32(reg_ebp);Push_32(reg_esi);Push_32(reg_edi);
+			}
+			catch (GuestPageFaultException &pf) {
+				LOG_MSG("PUSHAD interrupted by page fault");
+				reg_esp = old_esp;
+				throw;
+			}
+		} goto nextopcode;
 	case D_POPAw:
-		reg_di=Pop_16();reg_si=Pop_16();reg_bp=Pop_16();Pop_16();//Don't save SP
-		reg_bx=Pop_16();reg_dx=Pop_16();reg_cx=Pop_16();reg_ax=Pop_16();
-		goto nextopcode;
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_80186) goto illegalopcode;
+		{
+			Bitu old_esp = reg_esp;
+			try {
+				reg_di=Pop_16();reg_si=Pop_16();reg_bp=Pop_16();Pop_16();//Don't save SP
+				reg_bx=Pop_16();reg_dx=Pop_16();reg_cx=Pop_16();reg_ax=Pop_16();
+			}
+			catch (GuestPageFaultException &pf) {
+				LOG_MSG("POPA interrupted by page fault");
+				reg_esp = old_esp;
+				throw;
+			}
+		} goto nextopcode;
 	case D_POPAd:
-		reg_edi=Pop_32();reg_esi=Pop_32();reg_ebp=Pop_32();Pop_32();//Don't save ESP
-		reg_ebx=Pop_32();reg_edx=Pop_32();reg_ecx=Pop_32();reg_eax=Pop_32();
-		goto nextopcode;
+		{
+			Bitu old_esp = reg_esp;
+			try {
+				reg_edi=Pop_32();reg_esi=Pop_32();reg_ebp=Pop_32();Pop_32();//Don't save ESP
+				reg_ebx=Pop_32();reg_edx=Pop_32();reg_ecx=Pop_32();reg_eax=Pop_32();
+			}
+			catch (GuestPageFaultException &pf) {
+				LOG_MSG("POPAD interrupted by page fault");
+				reg_esp = old_esp;
+				throw;
+			}
+		} goto nextopcode;
 	case D_POPSEGw:
 		if (CPU_PopSeg((SegNames)inst.code.extra,false)) RunException();
 		goto nextopcode;
@@ -447,7 +481,8 @@ l_M_Ed:
 		goto nextopcode;
 	case D_LOCK: /* FIXME: according to intel, LOCK should raise an exception if it's not followed by one of a small set of instructions;
 			probably doesn't matter for our purposes as it is a pentium prefix anyhow */
-		LOG(LOG_CPU,LOG_NORMAL)("CPU:LOCK");
+// todo: make an option to show this
+//		LOG(LOG_CPU,LOG_NORMAL)("CPU:LOCK");
 		goto nextopcode;
 	case D_ENTERw:
 		{
@@ -464,15 +499,33 @@ l_M_Ed:
 			goto nextopcode;
 		}
 	case D_LEAVEw:
-		reg_esp&=cpu.stack.notmask;
-		reg_esp|=(reg_ebp&cpu.stack.mask);
-		reg_bp=Pop_16();
-		goto nextopcode;
+		{
+			Bit32u old_esp = reg_esp;
+
+			reg_esp &= cpu.stack.notmask;
+			reg_esp |= reg_ebp&cpu.stack.mask;
+			try {
+				reg_bp = Pop_16();
+			}
+			catch (GuestPageFaultException &pf) {
+				reg_esp = old_esp;
+				throw;
+			}
+		} goto nextopcode;
 	case D_LEAVEd:
-		reg_esp&=cpu.stack.notmask;
-		reg_esp|=(reg_ebp&cpu.stack.mask);
-		reg_ebp=Pop_32();
-		goto nextopcode;
+		{
+			Bit32u old_esp = reg_esp;
+
+			reg_esp &= cpu.stack.notmask;
+			reg_esp |= reg_ebp&cpu.stack.mask;
+			try {
+				reg_ebp = Pop_32();
+			}
+			catch (GuestPageFaultException &pf) {
+				reg_esp = old_esp;
+				throw;
+			}
+		} goto nextopcode;
 	case D_DAA:
 		DAA();
 		goto nextopcode;
@@ -508,7 +561,7 @@ l_M_Ed:
 		break;
 		}
 	default:
-		LOG(LOG_CPU,LOG_ERROR)("LOAD:Unhandled code %d opcode %X",inst.code.load,inst.entry);
+		LOG(LOG_CPU,LOG_ERROR)("LOAD:Unhandled code %d opcode %lx",inst.code.load,(unsigned long)inst.entry);
 		goto illegalopcode;
 }
 

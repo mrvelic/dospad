@@ -22,11 +22,12 @@
 
 #include <math.h>
 #include <float.h>
+#include "paging.h"
 #include "cross.h"
 #include "mem.h"
 #include "fpu.h"
 #include "cpu.h"
-#include "../save_state.h"
+#include "../cpu/lazyflags.h"
 
 FPU_rec fpu;
 
@@ -37,16 +38,14 @@ void FPU_FLDCW(PhysPt addr){
 
 Bit16u FPU_GetTag(void){
 	Bit16u tag=0;
-	for(Bitu i=0;i<8;i++)
-		tag |= ( (fpu.tags[i]&3) <<(2*i));
+
+	for (Bitu i=0;i<8;i++)
+		tag |= (fpu.tags[i]&3) << (2*i);
+
 	return tag;
 }
 
-#if C_FPU_X86
-#include "fpu_instructions_x86.h"
-#else
 #include "fpu_instructions.h"
-#endif
 
 /* WATCHIT : ALWAYS UPDATE REGISTERS BEFORE AND AFTER USING THEM 
 			STATUS WORD =>	FPU_SET_TOP(TOP) BEFORE a read
@@ -132,11 +131,21 @@ void FPU_ESC1_EA(Bitu rm,PhysPt addr) {
 	Bitu sub=(rm & 7);
 	switch(group){
 	case 0x00: /* FLD float*/
-		FPU_PREP_PUSH();
-		FPU_FLD_F32(addr,TOP);
+		{
+			unsigned char old_TOP = TOP;
+
+			try {
+				FPU_PREP_PUSH();
+				FPU_FLD_F32(addr,TOP);
+			}
+			catch (GuestPageFaultException &pf) {
+				TOP = old_TOP;
+				throw;
+			}
+		}
 		break;
 	case 0x01: /* UNKNOWN */
-		LOG(LOG_FPU,LOG_WARN)("ESC EA 1:Unhandled group %d subfunction %d",group,sub);
+		LOG(LOG_FPU,LOG_WARN)("ESC EA 1:Unhandled group %d subfunction %d",(int)group,(int)sub);
 		break;
 	case 0x02: /* FST float*/
 		FPU_FST_F32(addr);
@@ -158,7 +167,7 @@ void FPU_ESC1_EA(Bitu rm,PhysPt addr) {
 		mem_writew(addr,fpu.cw);
 		break;
 	default:
-		LOG(LOG_FPU,LOG_WARN)("ESC EA 1:Unhandled group %d subfunction %d",group,sub);
+		LOG(LOG_FPU,LOG_WARN)("ESC EA 1:Unhandled group %d subfunction %d",(int)group,(int)sub);
 		break;
 	}
 }
@@ -194,7 +203,7 @@ void FPU_ESC1_Normal(Bitu rm) {
 			break;
 		case 0x02:       /* UNKNOWN */
 		case 0x03:       /* ILLEGAL */
-			LOG(LOG_FPU,LOG_WARN)("ESC 1:Unhandled group %X subfunction %X",group,sub);
+			LOG(LOG_FPU,LOG_WARN)("ESC 1:Unhandled group %X subfunction %X",(int)group,(int)sub);
 			break;
 		case 0x04:       /* FTST */
 			FPU_FTST();
@@ -204,7 +213,7 @@ void FPU_ESC1_Normal(Bitu rm) {
 			break;
 		case 0x06:       /* FTSTP (cyrix)*/
 		case 0x07:       /* UNKNOWN */
-			LOG(LOG_FPU,LOG_WARN)("ESC 1:Unhandled group %X subfunction %X",group,sub);
+			LOG(LOG_FPU,LOG_WARN)("ESC 1:Unhandled group %X subfunction %X",(int)group,(int)sub);
 			break;
 		}
 		break;
@@ -232,7 +241,7 @@ void FPU_ESC1_Normal(Bitu rm) {
 			FPU_FLDZ();
 			break;
 		case 0x07:       /* ILLEGAL */
-			LOG(LOG_FPU,LOG_WARN)("ESC 1:Unhandled group %X subfunction %X",group,sub);
+			LOG(LOG_FPU,LOG_WARN)("ESC 1:Unhandled group %X subfunction %X",(int)group,(int)sub);
 			break;
 		}
 		break;
@@ -263,7 +272,7 @@ void FPU_ESC1_Normal(Bitu rm) {
 			TOP = (TOP + 1) & 7;
 			break;
 		default:
-			LOG(LOG_FPU,LOG_WARN)("ESC 1:Unhandled group %X subfunction %X",group,sub);
+			LOG(LOG_FPU,LOG_WARN)("ESC 1:Unhandled group %X subfunction %X",(int)group,(int)sub);
 			break;
 		}
 		break;
@@ -294,12 +303,12 @@ void FPU_ESC1_Normal(Bitu rm) {
 			FPU_FCOS();
 			break;
 		default:
-			LOG(LOG_FPU,LOG_WARN)("ESC 1:Unhandled group %X subfunction %X",group,sub);
+			LOG(LOG_FPU,LOG_WARN)("ESC 1:Unhandled group %X subfunction %X",(int)group,(int)sub);
 			break;
 		}
 		break;
 		default:
-			LOG(LOG_FPU,LOG_WARN)("ESC 1:Unhandled group %X subfunction %X",group,sub);
+			LOG(LOG_FPU,LOG_WARN)("ESC 1:Unhandled group %X subfunction %X",(int)group,(int)sub);
 	}
 }
 
@@ -314,6 +323,18 @@ void FPU_ESC2_Normal(Bitu rm) {
 	Bitu group=(rm >> 3) & 7;
 	Bitu sub=(rm & 7);
 	switch(group){
+	case 0x00: /* FCMOVB STi */
+		if (TFLG_B) FPU_FCMOV(TOP,STV(sub));
+		break;
+	case 0x01: /* FCMOVE STi */
+		if (TFLG_Z) FPU_FCMOV(TOP,STV(sub));
+		break;
+	case 0x02: /* FCMOVBE STi */
+		if (TFLG_BE) FPU_FCMOV(TOP,STV(sub));
+		break;
+	case 0x03: /* FCMOVU STi */
+		if (TFLG_P) FPU_FCMOV(TOP,STV(sub));
+		break;
 	case 0x05:
 		switch(sub){
 		case 0x01:		/* FUCOMPP */
@@ -322,12 +343,12 @@ void FPU_ESC2_Normal(Bitu rm) {
 			FPU_FPOP();
 			break;
 		default:
-			LOG(LOG_FPU,LOG_WARN)("ESC 2:Unhandled group %d subfunction %d",group,sub); 
+			LOG(LOG_FPU,LOG_WARN)("ESC 2:Unhandled group %d subfunction %d",(int)group,(int)sub); 
 			break;
 		}
 		break;
 	default:
-	   	LOG(LOG_FPU,LOG_WARN)("ESC 2:Unhandled group %d subfunction %d",group,sub);
+	   	LOG(LOG_FPU,LOG_WARN)("ESC 2:Unhandled group %d subfunction %d",(int)group,(int)sub);
 		break;
 	}
 }
@@ -336,13 +357,24 @@ void FPU_ESC2_Normal(Bitu rm) {
 void FPU_ESC3_EA(Bitu rm,PhysPt addr) {
 	Bitu group=(rm >> 3) & 7;
 	Bitu sub=(rm & 7);
+
 	switch(group){
 	case 0x00:	/* FILD */
-		FPU_PREP_PUSH();
-		FPU_FLD_I32(addr,TOP);
+		{
+			unsigned char old_TOP = TOP;
+
+			try {
+				FPU_PREP_PUSH();
+				FPU_FLD_I32(addr,TOP);
+			}
+			catch (GuestPageFaultException &pf) {
+				TOP = old_TOP;
+				throw;
+			}
+		}
 		break;
 	case 0x01:	/* FISTTP */
-		LOG(LOG_FPU,LOG_WARN)("ESC 3 EA:Unhandled group %d subfunction %d",group,sub);
+		LOG(LOG_FPU,LOG_WARN)("ESC 3 EA:Unhandled group %d subfunction %d",(int)group,(int)sub);
 		break;
 	case 0x02:	/* FIST */
 		FPU_FST_I32(addr);
@@ -352,15 +384,25 @@ void FPU_ESC3_EA(Bitu rm,PhysPt addr) {
 		FPU_FPOP();
 		break;
 	case 0x05:	/* FLD 80 Bits Real */
-		FPU_PREP_PUSH();
-		FPU_FLD_F80(addr);
+		{
+			unsigned char old_TOP = TOP;
+
+			try {
+				FPU_PREP_PUSH();
+				FPU_FLD_F80(addr);
+			}
+			catch (GuestPageFaultException &pf) {
+				TOP = old_TOP;
+				throw;
+			}
+		}
 		break;
 	case 0x07:	/* FSTP 80 Bits Real */
 		FPU_FST_F80(addr);
 		FPU_FPOP();
 		break;
 	default:
-		LOG(LOG_FPU,LOG_WARN)("ESC 3 EA:Unhandled group %d subfunction %d",group,sub);
+		LOG(LOG_FPU,LOG_WARN)("ESC 3 EA:Unhandled group %d subfunction %d",(int)group,(int)sub);
 	}
 }
 
@@ -368,11 +410,23 @@ void FPU_ESC3_Normal(Bitu rm) {
 	Bitu group=(rm >> 3) & 7;
 	Bitu sub=(rm & 7);
 	switch (group) {
+	case 0x00: /* FCMOVNB STi */
+		if (TFLG_NB) FPU_FCMOV(TOP,STV(sub));
+		break;
+	case 0x01: /* FCMOVNE STi */
+		if (TFLG_NZ) FPU_FCMOV(TOP,STV(sub));
+		break;
+	case 0x02: /* FCMOVNBE STi */
+		if (TFLG_NBE) FPU_FCMOV(TOP,STV(sub));
+		break;
+	case 0x03: /* FCMOVNU STi */
+		if (TFLG_NP) FPU_FCMOV(TOP,STV(sub));
+		break;
 	case 0x04:
 		switch (sub) {
 		case 0x00:				//FNENI
 		case 0x01:				//FNDIS
-			LOG(LOG_FPU,LOG_ERROR)("8087 only fpu code used esc 3: group 4: subfuntion :%d",sub);
+			LOG(LOG_FPU,LOG_ERROR)("8087 only fpu code used esc 3: group 4: subfuntion :%d",(int)sub);
 			break;
 		case 0x02:				//FNCLEX FCLEX
 			FPU_FCLEX();
@@ -386,11 +440,17 @@ void FPU_ESC3_Normal(Bitu rm) {
 			FPU_FNOP();
 			break;
 		default:
-			E_Exit("ESC 3:ILLEGAL OPCODE group %d subfunction %d",group,sub);
+			E_Exit("ESC 3:ILLEGAL OPCODE group %d subfunction %d",(int)group,(int)sub);
 		}
 		break;
+	case 0x05:		/* FUCOMI STi */
+		FPU_FUCOMI(TOP,STV(sub));
+		break;
+	case 0x06:		/* FCOMI STi */
+		FPU_FCOMI(TOP,STV(sub));
+		break;
 	default:
-		LOG(LOG_FPU,LOG_WARN)("ESC 3:Unhandled group %d subfunction %d",group,sub);
+		LOG(LOG_FPU,LOG_WARN)("ESC 3:Unhandled group %d subfunction %d",(int)group,(int)sub);
 		break;
 	}
 	return;
@@ -443,11 +503,21 @@ void FPU_ESC5_EA(Bitu rm,PhysPt addr) {
 	Bitu sub=(rm & 7);
 	switch(group){
 	case 0x00:  /* FLD double real*/
-		FPU_PREP_PUSH();
-		FPU_FLD_F64(addr,TOP);
+		{
+			unsigned char old_TOP = TOP;
+
+			try {
+				FPU_PREP_PUSH();
+				FPU_FLD_F64(addr,TOP);
+			}
+			catch (GuestPageFaultException &pf) {
+				TOP = old_TOP;
+				throw;
+			}
+		}
 		break;
 	case 0x01:  /* FISTTP longint*/
-		LOG(LOG_FPU,LOG_WARN)("ESC 5 EA:Unhandled group %d subfunction %d",group,sub);
+		LOG(LOG_FPU,LOG_WARN)("ESC 5 EA:Unhandled group %d subfunction %d",(int)group,(int)sub);
 		break;
 	case 0x02:   /* FST double real*/
 		FPU_FST_F64(addr);
@@ -468,7 +538,7 @@ void FPU_ESC5_EA(Bitu rm,PhysPt addr) {
 		//seems to break all dos4gw games :)
 		break;
 	default:
-		LOG(LOG_FPU,LOG_WARN)("ESC 5 EA:Unhandled group %d subfunction %d",group,sub);
+		LOG(LOG_FPU,LOG_WARN)("ESC 5 EA:Unhandled group %d subfunction %d",(int)group,(int)sub);
 	}
 }
 
@@ -497,7 +567,7 @@ void FPU_ESC5_Normal(Bitu rm) {
 		FPU_FPOP();
 		break;
 	default:
-	LOG(LOG_FPU,LOG_WARN)("ESC 5:Unhandled group %d subfunction %d",group,sub);
+	LOG(LOG_FPU,LOG_WARN)("ESC 5:Unhandled group %d subfunction %d",(int)group,(int)sub);
 	break;
 	}
 }
@@ -525,7 +595,7 @@ void FPU_ESC6_Normal(Bitu rm) {
 		break;	/* TODO IS THIS ALLRIGHT ????????? */
 	case 0x03:  /*FCOMPP*/
 		if(sub != 1) {
-			LOG(LOG_FPU,LOG_WARN)("ESC 6:Unhandled group %d subfunction %d",group,sub);
+			LOG(LOG_FPU,LOG_WARN)("ESC 6:Unhandled group %d subfunction %d",(int)group,(int)sub);
 			return;
 		}
 		FPU_FCOM(TOP,STV(1));
@@ -555,11 +625,21 @@ void FPU_ESC7_EA(Bitu rm,PhysPt addr) {
 	Bitu sub=(rm & 7);
 	switch(group){
 	case 0x00:  /* FILD Bit16s */
-		FPU_PREP_PUSH();
-		FPU_FLD_I16(addr,TOP);
+		{
+			unsigned char old_TOP = TOP;
+
+			try {
+				FPU_PREP_PUSH();
+				FPU_FLD_I16(addr,TOP);
+			}
+			catch (GuestPageFaultException &pf) {
+				TOP = old_TOP;
+				throw;
+			}
+		}
 		break;
 	case 0x01:
-		LOG(LOG_FPU,LOG_WARN)("ESC 7 EA:Unhandled group %d subfunction %d",group,sub);
+		LOG(LOG_FPU,LOG_WARN)("ESC 7 EA:Unhandled group %d subfunction %d",(int)group,(int)sub);
 		break;
 	case 0x02:   /* FIST Bit16s */
 		FPU_FST_I16(addr);
@@ -569,12 +649,32 @@ void FPU_ESC7_EA(Bitu rm,PhysPt addr) {
 		FPU_FPOP();
 		break;
 	case 0x04:   /* FBLD packed BCD */
-		FPU_PREP_PUSH();
-		FPU_FBLD(addr,TOP);
+		{
+			unsigned char old_TOP = TOP;
+
+			try {
+				FPU_PREP_PUSH();
+				FPU_FBLD(addr,TOP);
+			}
+			catch (GuestPageFaultException &pf) {
+				TOP = old_TOP;
+				throw;
+			}
+		}
 		break;
 	case 0x05:  /* FILD Bit64s */
-		FPU_PREP_PUSH();
-		FPU_FLD_I64(addr,TOP);
+		{
+			unsigned char old_TOP = TOP;
+
+			try {
+				FPU_PREP_PUSH();
+				FPU_FLD_I64(addr,TOP);
+			}
+			catch (GuestPageFaultException &pf) {
+				TOP = old_TOP;
+				throw;
+			}
+		}
 		break;
 	case 0x06:	/* FBSTP packed BCD */
 		FPU_FBST(addr);
@@ -585,7 +685,7 @@ void FPU_ESC7_EA(Bitu rm,PhysPt addr) {
 		FPU_FPOP();
 		break;
 	default:
-		LOG(LOG_FPU,LOG_WARN)("ESC 7 EA:Unhandled group %d subfunction %d",group,sub);
+		LOG(LOG_FPU,LOG_WARN)("ESC 7 EA:Unhandled group %d subfunction %d",(int)group,(int)sub);
 		break;
 	}
 }
@@ -613,35 +713,309 @@ void FPU_ESC7_Normal(Bitu rm) {
 				reg_ax = fpu.sw;
 				break;
 			default:
-				LOG(LOG_FPU,LOG_WARN)("ESC 7:Unhandled group %d subfunction %d",group,sub);
+				LOG(LOG_FPU,LOG_WARN)("ESC 7:Unhandled group %d subfunction %d",(int)group,(int)sub);
 				break;
 		}
 		break;
+	case 0x05:		/* FUCOMIP STi */
+		FPU_FUCOMI(TOP,STV(sub));
+		FPU_FPOP();
+		break;
+	case 0x06:		/* FCOMIP STi */
+		FPU_FCOMI(TOP,STV(sub));
+		FPU_FPOP();
+		break;
 	default:
-		LOG(LOG_FPU,LOG_WARN)("ESC 7:Unhandled group %d subfunction %d",group,sub);
+		LOG(LOG_FPU,LOG_WARN)("ESC 7:Unhandled group %d subfunction %d",(int)group,(int)sub);
 		break;
 	}
 }
 
+// test routine at startup to make sure our typedef struct bitfields
+// line up with the host's definition of a 32-bit single-precision
+// floating point value.
+void FPU_Selftest_32() {
+	struct ftest {
+		const char*	name;
+		float		val;
+		int		exponent:15;
+		unsigned int	sign:1;
+		uint32_t	mantissa;
+	};
+	static const struct ftest test[] = {
+		// name			// val		// exponent (no bias)		// sign		// 23-bit mantissa without 23rd implied bit (max 2^23-1 = 0x7FFFFF)
+		{"0.0f",		0.0f,		-FPU_Reg_32_exponent_bias,	0,		0x000000},	// IEEE standard way to encode zero
+		{"1.0f",		1.0f,		0,				0,		0x000000},	// 1.0 x 2^0 = 1.0 x 1 = 1.0
+		{"2.0f",		2.0f,		1,				0,		0x000000},	// 1.0 x 2^1 = 1.0 x 2 = 2.0
+		{"3.0f",		3.0f,		1,				0,		0x400000},	// 1.5 x 2^1 = 1.5 x 2 = 3.0
+		{"4.0f",		4.0f,		2,				0,		0x000000},	// 1.0 x 2^2 = 1.0 x 4 = 4.0
+		{"-1.0f",		-1.0f,		0,				1,		0x000000},	// 1.0 x 2^0 = 1.0 x 1 = 1.0
+		{"-2.0f",		-2.0f,		1,				1,		0x000000},	// 1.0 x 2^1 = 1.0 x 2 = 2.0
+		{"-3.0f",		-3.0f,		1,				1,		0x400000},	// 1.5 x 2^1 = 1.5 x 2 = 3.0
+		{"-4.0f",		-4.0f,		2,				1,		0x000000}	// 1.0 x 2^2 = 1.0 x 4 = 4.0
+	};
+	static const size_t tests = sizeof(test) / sizeof(test[0]);
+	FPU_Reg_32 ft;
 
-void FPU_Init(Section*) {
+	if (sizeof(ft) < 4) {
+		LOG(LOG_FPU,LOG_WARN)("FPU32 sizeof(reg32) < 4 bytes");
+		return;
+	}
+	if (sizeof(float) != 4) {
+		LOG(LOG_FPU,LOG_WARN)("FPU32 sizeof(float) != 4 bytes your host is weird");
+		return;
+	}
+
+	// make sure bitfields line up
+	ft.raw = 1UL << 31UL;
+	if (ft.f.sign != 1 || ft.f.exponent != 0 || ft.f.mantissa != 0) {
+		LOG(LOG_FPU,LOG_WARN)("FPU32 bitfield test #1 failed");
+		return;
+	}
+	ft.raw = 1UL << 23UL;
+	if (ft.f.sign != 0 || ft.f.exponent != 1 || ft.f.mantissa != 0) {
+		LOG(LOG_FPU,LOG_WARN)("FPU32 bitfield test #2 failed");
+		return;
+	}
+	ft.raw = 1UL << 0UL;
+	if (ft.f.sign != 0 || ft.f.exponent != 0 || ft.f.mantissa != 1) {
+		LOG(LOG_FPU,LOG_WARN)("FPU32 bitfield test #3 failed");
+		return;
+	}
+
+	// carry out tests
+	for (size_t t=0;t < tests;t++) {
+		ft.v = test[t].val; FPU_Reg_m_barrier();
+		if (((int)ft.f.exponent - FPU_Reg_32_exponent_bias) != test[t].exponent ||
+			ft.f.sign != test[t].sign || ft.f.mantissa != test[t].mantissa) {
+			LOG(LOG_FPU,LOG_WARN)("FPU32 selftest fail stage %s",test[t].name);
+			LOG(LOG_FPU,LOG_WARN)("  expected t.v = %.10f t.s=%u t.exp=%d t.mantissa=%u",
+				test[t].val,
+				test[t].sign,
+				(int)test[t].exponent,
+				(unsigned int)test[t].mantissa);
+			goto dump;
+		}
+	}
+
+	LOG(LOG_FPU,LOG_DEBUG)("FPU32 selftest passed");
+	return;
+dump:
+	LOG(LOG_FPU,LOG_WARN)("Result: t.v = %.10f t.s=%u t.exp=%d t.mantissa=%u",
+		ft.v,
+		ft.f.sign,
+		(int)ft.f.exponent - FPU_Reg_32_exponent_bias,
+		(unsigned int)ft.f.mantissa);
+}
+
+// test routine at startup to make sure our typedef struct bitfields
+// line up with the host's definition of a 64-bit double-precision
+// floating point value.
+void FPU_Selftest_64() {
+	struct ftest {
+		const char*	name;
+		double		val;
+		int		exponent:15;
+		unsigned int	sign:1;
+		uint64_t	mantissa;
+	};
+	static const struct ftest test[] = {
+		// name			// val		// exponent (no bias)		// sign		// 52-bit mantissa without 52rd implied bit (max 2^52-1 = 0x1FFFFFFFFFFFFF)
+		{"0.0d",		0.0,		-FPU_Reg_64_exponent_bias,	0,		0x0000000000000ULL},	// IEEE standard way to encode zero
+		{"1.0d",		1.0,		0,				0,		0x0000000000000ULL},	// 1.0 x 2^0 = 1.0 x 1 = 1.0
+		{"2.0d",		2.0,		1,				0,		0x0000000000000ULL},	// 1.0 x 2^1 = 1.0 x 2 = 2.0
+		{"3.0d",		3.0,		1,				0,		0x8000000000000ULL},	// 1.5 x 2^1 = 1.5 x 2 = 3.0
+		{"4.0d",		4.0,		2,				0,		0x0000000000000ULL},	// 1.0 x 2^2 = 1.0 x 4 = 4.0
+		{"-1.0d",		-1.0,		0,				1,		0x0000000000000ULL},	// 1.0 x 2^0 = 1.0 x 1 = 1.0
+		{"-2.0d",		-2.0,		1,				1,		0x0000000000000ULL},	// 1.0 x 2^1 = 1.0 x 2 = 2.0
+		{"-3.0d",		-3.0,		1,				1,		0x8000000000000ULL},	// 1.5 x 2^1 = 1.5 x 2 = 3.0
+		{"-4.0d",		-4.0,		2,				1,		0x0000000000000ULL}	// 1.0 x 2^2 = 1.0 x 4 = 4.0
+	};
+	static const size_t tests = sizeof(test) / sizeof(test[0]);
+	FPU_Reg_64 ft;
+
+	if (sizeof(ft) < 8) {
+		LOG(LOG_FPU,LOG_WARN)("FPU64 sizeof(reg64) < 8 bytes");
+		return;
+	}
+	if (sizeof(double) != 8) {
+		LOG(LOG_FPU,LOG_WARN)("FPU64 sizeof(float) != 8 bytes your host is weird");
+		return;
+	}
+
+	// make sure bitfields line up
+	ft.raw = 1ULL << 63ULL;
+	if (ft.f.sign != 1 || ft.f.exponent != 0 || ft.f.mantissa != 0) {
+		LOG(LOG_FPU,LOG_WARN)("FPU64 bitfield test #1 failed");
+		return;
+	}
+	ft.raw = 1ULL << 52ULL;
+	if (ft.f.sign != 0 || ft.f.exponent != 1 || ft.f.mantissa != 0) {
+		LOG(LOG_FPU,LOG_WARN)("FPU64 bitfield test #2 failed");
+		return;
+	}
+	ft.raw = 1ULL << 0ULL;
+	if (ft.f.sign != 0 || ft.f.exponent != 0 || ft.f.mantissa != 1) {
+		LOG(LOG_FPU,LOG_WARN)("FPU64 bitfield test #3 failed");
+		return;
+	}
+
+	for (size_t t=0;t < tests;t++) {
+		ft.v = test[t].val; FPU_Reg_m_barrier();
+		if (((int)ft.f.exponent - FPU_Reg_64_exponent_bias) != test[t].exponent ||
+			ft.f.sign != test[t].sign || ft.f.mantissa != test[t].mantissa) {
+			LOG(LOG_FPU,LOG_WARN)("FPU64 selftest fail stage %s",test[t].name);
+			LOG(LOG_FPU,LOG_WARN)("  expected t.v = %.10f t.s=%u t.exp=%d t.mantissa=%llu (0x%llx)",
+				test[t].val,
+				test[t].sign,
+				(int)test[t].exponent,
+				(unsigned long long)test[t].mantissa,
+				(unsigned long long)test[t].mantissa);
+			goto dump;
+		}
+	}
+
+	LOG(LOG_FPU,LOG_DEBUG)("FPU64 selftest passed");
+	return;
+dump:
+	LOG(LOG_FPU,LOG_WARN)("Result: t.v = %.10f t.s=%u t.exp=%d t.mantissa=%llu (0x%llx)",
+		ft.v,
+		(int)ft.f.sign,
+		(int)ft.f.exponent - FPU_Reg_64_exponent_bias,
+		(unsigned long long)ft.f.mantissa,
+		(unsigned long long)ft.f.mantissa);
+}
+
+// test routine at startup to make sure our typedef struct bitfields
+// line up with the host's definition of a 80-bit extended-precision
+// floating point value (if the host is i686, x86_64, or any other
+// host with the same definition of long double).
+void FPU_Selftest_80() {
+#if defined(HAS_LONG_DOUBLE)
+	// we're assuming "long double" means the Intel 80x87 extended precision format, which is true when using
+	// GCC on Linux i686 and x86_64 hosts.
+	//
+	// I understand that other platforms (PowerPC, Sparc, etc) might have other ideas on what makes "long double"
+	// and I also understand Microsoft Visual C++ treats long double the same as double. We will disable this
+	// test with #ifdefs when compiling for platforms where long double doesn't mean 80-bit extended precision.
+	struct ftest {
+		const char*	name;
+		long double	val;
+		int		exponent:15;
+		unsigned int	sign:1;
+		uint64_t	mantissa;
+	};
+	static const struct ftest test[] = {
+		// name			// val		// exponent (no bias)		// sign		// 64-bit mantissa WITH whole integer bit #63
+		{"0.0L",		0.0,		-FPU_Reg_80_exponent_bias,	0,		0x0000000000000000ULL},	// IEEE standard way to encode zero
+		{"1.0L",		1.0,		0,				0,		0x8000000000000000ULL},	// 1.0 x 2^0 = 1.0 x 1 = 1.0
+		{"2.0L",		2.0,		1,				0,		0x8000000000000000ULL},	// 1.0 x 2^1 = 1.0 x 2 = 2.0
+		{"3.0L",		3.0,		1,				0,		0xC000000000000000ULL},	// 1.5 x 2^1 = 1.5 x 2 = 3.0
+		{"4.0L",		4.0,		2,				0,		0x8000000000000000ULL},	// 1.0 x 2^2 = 1.0 x 4 = 4.0
+		{"-1.0L",		-1.0,		0,				1,		0x8000000000000000ULL},	// 1.0 x 2^0 = 1.0 x 1 = 1.0
+		{"-2.0L",		-2.0,		1,				1,		0x8000000000000000ULL},	// 1.0 x 2^1 = 1.0 x 2 = 2.0
+		{"-3.0L",		-3.0,		1,				1,		0xC000000000000000ULL},	// 1.5 x 2^1 = 1.5 x 2 = 3.0
+		{"-4.0L",		-4.0,		2,				1,		0x8000000000000000ULL}	// 1.0 x 2^2 = 1.0 x 4 = 4.0
+	};
+	static const size_t tests = sizeof(test) / sizeof(test[0]);
+#endif
+	FPU_Reg_80 ft;
+
+	if (sizeof(ft) < 10) {
+		LOG(LOG_FPU,LOG_WARN)("FPU80 sizeof(reg80) < 10 bytes");
+		return;
+	}
+#if defined(HAS_LONG_DOUBLE)
+	if (sizeof(long double) == sizeof(double)) {
+		LOG(LOG_FPU,LOG_WARN)("FPU80 sizeof(long double) == sizeof(double) so your compiler just makes it an alias. skipping tests. please recompile with proper config.");
+		return;
+	}
+	else if (sizeof(long double) < 10 || sizeof(long double) > 16) {
+		// NTS: We can't assume 10 bytes. GCC on i686 makes long double 12 or 16 bytes long for alignment
+		//      even though only 80 bits (10 bytes) are used.
+		LOG(LOG_FPU,LOG_WARN)("FPU80 sizeof(float) < 10 bytes your host is weird");
+		return;
+	}
+#endif
+
+	// make sure bitfields line up
+	ft.raw.l = 0;
+	ft.raw.h = 1U << 15U;
+	if (ft.f.sign != 1 || ft.f.exponent != 0 || ft.f.mantissa != 0) {
+		LOG(LOG_FPU,LOG_WARN)("FPU80 bitfield test #1 failed. h=%04x l=%016llx",(unsigned int)ft.raw.h,(unsigned long long)ft.raw.l);
+		return;
+	}
+	ft.raw.l = 0;
+	ft.raw.h = 1U << 0U;
+	if (ft.f.sign != 0 || ft.f.exponent != 1 || ft.f.mantissa != 0) {
+		LOG(LOG_FPU,LOG_WARN)("FPU80 bitfield test #2 failed. h=%04x l=%016llx",(unsigned int)ft.raw.h,(unsigned long long)ft.raw.l);
+		return;
+	}
+	ft.raw.l = 1ULL << 0ULL;
+	ft.raw.h = 0;
+	if (ft.f.sign != 0 || ft.f.exponent != 0 || ft.f.mantissa != 1) {
+		LOG(LOG_FPU,LOG_WARN)("FPU80 bitfield test #3 failed. h=%04x l=%016llx",(unsigned int)ft.raw.h,(unsigned long long)ft.raw.l);
+		return;
+	}
+
+#if defined(HAS_LONG_DOUBLE)
+	for (size_t t=0;t < tests;t++) {
+		ft.v = test[t].val; FPU_Reg_m_barrier();
+		if (((int)ft.f.exponent - FPU_Reg_80_exponent_bias) != test[t].exponent ||
+			ft.f.sign != test[t].sign || ft.f.mantissa != test[t].mantissa) {
+			LOG(LOG_FPU,LOG_WARN)("FPU80 selftest fail stage %s",test[t].name);
+			LOG(LOG_FPU,LOG_WARN)("  expected t.v = %.10Lf t.s=%u t.exp=%d t.mantissa=%llu (0x%llx)",
+				test[t].val,
+				test[t].sign,
+				(int)test[t].exponent,
+				(unsigned long long)test[t].mantissa,
+				(unsigned long long)test[t].mantissa);
+			goto dump;
+		}
+	}
+
+	LOG(LOG_FPU,LOG_DEBUG)("FPU80 selftest passed");
+	return;
+dump:
+	LOG(LOG_FPU,LOG_WARN)("Result: t.v = %.10Lf t.s=%u t.exp=%d t.mantissa=%llu (0x%llx)",
+		ft.v,
+		(int)ft.f.sign,
+		(int)ft.f.exponent - FPU_Reg_64_exponent_bias,
+		(unsigned long long)ft.f.mantissa,
+		(unsigned long long)ft.f.mantissa);
+#else
+	LOG(LOG_FPU,LOG_DEBUG)("FPU80 selftest skipped, compiler does not have long double as 80-bit IEEE");
+#endif
+}
+
+void FPU_Selftest() {
+	FPU_Reg freg;
+
+	/* byte order test */
+	freg.ll = 0x0123456789ABCDEFULL;
+#ifndef WORDS_BIGENDIAN
+	if (freg.l.lower != 0x89ABCDEFUL || freg.l.upper != 0x01234567UL) {
+		LOG(LOG_FPU,LOG_WARN)("FPU_Reg field order is wrong. ll=0x%16llx l=0x%08lx h=0x%08lx",
+			(unsigned long long)freg.ll,	(unsigned long)freg.l.lower,	(unsigned long)freg.l.upper);
+	}
+#else
+	if (freg.l.upper != 0x89ABCDEFUL || freg.l.lower != 0x01234567UL) {
+		LOG(LOG_FPU,LOG_WARN)("FPU_Reg field order is wrong. ll=0x%16llx l=0x%08lx h=0x%08lx",
+			(unsigned long long)freg.ll,	(unsigned long)freg.l.lower,	(unsigned long)freg.l.upper);
+	}
+#endif
+
+	FPU_Selftest_32();
+	FPU_Selftest_64();
+	FPU_Selftest_80();
+}
+
+void FPU_Init() {
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing FPU");
+
+	FPU_Selftest();
 	FPU_FINIT();
 }
 
 #endif
 
-
-//save state support
-#if C_FPU
-namespace
-{
-class SerializeFpu : public SerializeGlobalPOD
-{
-public:
-    SerializeFpu() : SerializeGlobalPOD("FPU")
-    {
-        registerPOD(fpu);
-    }
-} dummy;
-}
-#endif

@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2002-2015  The DOSBox Team
+ *  Copyright (C) 2002-2013  The DOSBox Team
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -89,6 +89,8 @@
 
 inline void conc2d(Hq3x,SBPP)(PTYPE * line0, PTYPE * line1, PTYPE * line2, const PTYPE * fc)
 {
+    (void)conc2d(Hq3x,SBPP);
+
 	if (_RGBtoYUV == 0) conc2d(InitLUTs,SBPP)();
 
 	Bit32u pattern = 0;

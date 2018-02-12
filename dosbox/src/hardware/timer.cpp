@@ -25,16 +25,7 @@
 #include "mixer.h"
 #include "timer.h"
 #include "setup.h"
-#include "../save_state.h"
-
-enum {
-	PIT_HACK_NONE=0,
-
-	PIT_HACK_PROJECT_ANGEL_DEMO,
-	PIT_HACK_PC_SPEAKER_AS_TIMER
-};
-
-static int pit_hack_mode = PIT_HACK_NONE;
+#include "control.h"
 
 static INLINE void BIN2BCD(Bit16u& val) {
 	Bit16u temp=val%10 + (((val/10)%10)<<4)+ (((val/100)%10)<<8) + (((val/1000)%10)<<12);
@@ -74,6 +65,8 @@ static Bit8u latched_timerstatus;
 // the timer status can not be overwritten until it is read or the timer was 
 // reprogrammed.
 static bool latched_timerstatus_locked;
+
+unsigned long PIT_TICK_RATE = PIT_TICK_RATE_IBM;
 
 static void PIT0_Event(Bitu /*val*/) {
 	PIC_ActivateIRQ(0);
@@ -150,7 +143,8 @@ static void counter_latch(Bitu counter) {
 	p->go_read_latch=false;
 
 	//If gate2 is disabled don't update the read_latch
-	if (counter == 2 && !gate2 && p->mode !=1) return;
+	if (counter == (IS_PC98_ARCH ? 1 : 2) && !gate2 && p->mode !=1) return;
+
 	if (GCC_UNLIKELY(p->new_mode)) {
 		double passed_time = PIC_FullIndex() - p->start;
 		Bitu ticks_since_then = (Bitu)(passed_time / (1000.0/PIT_TICK_RATE));
@@ -162,28 +156,15 @@ static void counter_latch(Bitu counter) {
 	switch (p->mode) {
 	case 4:		/* Software Triggered Strobe */
 	case 0:		/* Interrupt on Terminal Count */
-		if (counter == 2 && pit_hack_mode == PIT_HACK_PC_SPEAKER_AS_TIMER) {
-			/* Needed for Impact Studios "Legend". Perhaps the need for this hack is
-			 * a sign that some parts of DOSBox's PIT emulation still needs work. */
-			double f;
-
-			index *= 4; /* <- FIXME: Why does this work? Seems best setting when cycles=10000 */
-			/* ^ NTS: Setting too high makes the ball bounce TOO fast, and some parts
-			 *        sporadically fast-forward. */
-
-			f = index*(PIT_TICK_RATE/1000.0);
-			if (f > p->cntr) f = p->cntr;
-			p->read_latch = p->cntr - (Bit16u)f;
-		}
-		else {
-		/* Counter keeps on counting after passing terminal count */
+		{
+			/* Counter keeps on counting after passing terminal count */
 			if(p->bcd) {
 				index = fmod(index,(1000.0/PIT_TICK_RATE)*10000.0);
 				p->read_latch = (Bit16u)(((unsigned long)(p->cntr-index*(PIT_TICK_RATE/1000.0))) % 10000UL);
 			} else {
 				index = fmod(index,(1000.0/PIT_TICK_RATE)*(double)0x10000);
-			p->read_latch=(Bit16u)(p->cntr-index*(PIT_TICK_RATE/1000.0));
-		}
+				p->read_latch = (Bit16u)(p->cntr-index*(PIT_TICK_RATE/1000.0));
+			}
 		}
 		break;
 	case 1: // countdown
@@ -210,7 +191,7 @@ static void counter_latch(Bitu counter) {
 		p->read_latch&=0xfffe;
 		break;
 	default:
-		LOG(LOG_PIT,LOG_ERROR)("Illegal Mode %d for reading counter %d",p->mode,counter);
+		LOG(LOG_PIT,LOG_ERROR)("Illegal Mode %d for reading counter %d",(int)p->mode,(int)counter);
 		p->read_latch=0xffff;
 		break;
 	}
@@ -219,6 +200,12 @@ static void counter_latch(Bitu counter) {
 
 static void write_latch(Bitu port,Bitu val,Bitu /*iolen*/) {
 //LOG(LOG_PIT,LOG_ERROR)("port %X write:%X state:%X",port,val,pit[port-0x40].write_state);
+
+    // HACK: Port translation for this code PC-98 mode.
+    //       0x71,0x73,0x75,0x77 => 0x40-0x43
+    if (IS_PC98_ARCH)
+        port = ((port - 0x71) >> 1) + 0x40;
+
 	Bitu counter=port-0x40;
 	PIT_Block * p=&pit[counter];
 	if(p->bcd == true) BIN2BCD(p->write_latch);
@@ -241,8 +228,6 @@ static void write_latch(Bitu port,Bitu val,Bitu /*iolen*/) {
 	}
 	if (p->bcd==true) BCD2BIN(p->write_latch);
    	if (p->write_state != 0) {
-		Bitu prev_cntr = p->cntr;
-
 		if (p->write_latch == 0) {
 			if (p->bcd == false) p->cntr = 0x10000;
 			else p->cntr=9999;
@@ -258,43 +243,6 @@ static void write_latch(Bitu port,Bitu val,Bitu /*iolen*/) {
 		p->start=PIC_FullIndex();
 		p->delay=(1000.0f/((float)PIT_TICK_RATE/(float)p->cntr));
 
-		switch (pit_hack_mode) {
-			case PIT_HACK_PROJECT_ANGEL_DEMO:
-				if (counter == 0) {
-					/* Project Angel PIT hack. The demo is constantly fiddling around with
-					 * the counter value in ways that can sometimes cause the demo to hang,
-					 * or in ways that prevent the demo from starting or can cause the demo
-					 * to run at half speed.
-					 *
-					 * Perhaps the programmers learned the hard way that switching the counter
-					 * rapidly between 18Hz and 421Hz is not a good way to run a demo.
-					 *
-					 * We force the counter value to one of two values to forcibly stabilize
-					 * the demo's timing. Doing this also fixes the VGA tearline that is
-					 * visible in the demo's Mode-X parts.
-					 *
-					 * I also noticed that without this hack, the music in the demo is prone
-					 * to skip forward suddenly during BIOS video mode changes, which this
-					 * hack also resolves.
-					 *
-					 * NTS: We do not modify the counter value, because that breaks the demo
-					 * too when it reads back a different value than it wrote. Instead, we
-					 * ignore the counter value it wrote and force a delay value. */
-					/* NTS: We also force the higher rate if we detect that it wrote 18.2Hz
-					 * more than once, as that is a sign it hung at startup */
-					if (p->cntr > 64000 && prev_cntr > 64000)
-						LOG_MSG("PIT hack for Project Angel: 18.2Hz was written twice---did the demo hang? Forcing timer to higher rate.\n");
-
-					if (p->cntr > 64000 && prev_cntr <= 64000)
-						p->delay=(1000.0f/((float)PIT_TICK_RATE/(float)65536));
-					else
-						p->delay=(1000.0f/((float)PIT_TICK_RATE/(float)2834));
-				}
-				break;
-			case PIT_HACK_PC_SPEAKER_AS_TIMER:
-				break;
-		}
-
 		switch (counter) {
 		case 0x00:			/* Timer hooked to IRQ 0 */
 			if (p->new_mode || p->mode == 0 ) {
@@ -303,10 +251,15 @@ static void write_latch(Bitu port,Bitu val,Bitu /*iolen*/) {
 			} else LOG(LOG_PIT,LOG_NORMAL)("PIT 0 Timer set without new control word");
 			LOG(LOG_PIT,LOG_NORMAL)("PIT 0 Timer at %.4f Hz mode %d",1000.0/p->delay,p->mode);
 			break;
-		case 0x02:			/* Timer hooked to PC-Speaker */
-			PCSPEAKER_SetCounter(p->cntr,p->mode);
-			break;
-		default:
+        case 0x01:          /* Timer hooked to PC-Speaker (NEC-PC98) */
+            if (IS_PC98_ARCH)
+                PCSPEAKER_SetCounter(p->cntr,p->mode);
+            break;
+        case 0x02:			/* Timer hooked to PC-Speaker (IBM PC) */
+            if (!IS_PC98_ARCH)
+                PCSPEAKER_SetCounter(p->cntr,p->mode);
+            break;
+        default:
 			LOG(LOG_PIT,LOG_ERROR)("PIT:Illegal timer selected for writing");
 		}
 		p->new_mode=false;
@@ -315,6 +268,12 @@ static void write_latch(Bitu port,Bitu val,Bitu /*iolen*/) {
 
 static Bitu read_latch(Bitu port,Bitu /*iolen*/) {
 //LOG(LOG_PIT,LOG_ERROR)("port read %X",port);
+
+    // HACK: Port translation for this code PC-98 mode.
+    //       0x71,0x73,0x75,0x77 => 0x40-0x43
+    if (IS_PC98_ARCH)
+        port = ((port - 0x71) >> 1) + 0x40;
+
 	Bit32u counter=port-0x40;
 	Bit8u ret=0;
 	if(GCC_UNLIKELY(pit[counter].counterstatus_set)){
@@ -408,7 +367,7 @@ static void write_p43(Bitu /*port*/,Bitu val,Bitu /*iolen*/) {
 				}
 			}
 			pit[latch].new_mode = true;
-			if (latch == 2) {
+			if (latch == (IS_PC98_ARCH ? 1 : 2)) {
 				// notify pc speaker code that the control word was written
 				PCSPEAKER_SetPITControl(mode);
 			}
@@ -471,125 +430,240 @@ bool TIMER_GetOutput2() {
 
 #include "programs.h"
 
-void PIT_HACK_Set_type(std::string type) {
-	if (type == "project_angel_demo") {
-		pit_hack_mode = PIT_HACK_PROJECT_ANGEL_DEMO;
-		//LOG_MSG("PIT: Hacking PIT emulation to stabilize Project Angel demo\n");
-	}
-	else if (type == "pc_speaker_as_timer") {
-		pit_hack_mode = PIT_HACK_PC_SPEAKER_AS_TIMER;
-		//LOG_MSG("PIT: Hacking PIT emulation to double PIT 2 countdown value\n");
-	}
-	else {
-		pit_hack_mode = PIT_HACK_NONE;
-		//LOG_MSG("PIT: Hacks disabled\n");
-	}
-}
+static IO_ReadHandleObject ReadHandler[4];
+static IO_WriteHandleObject WriteHandler[4];
 
-class PITHACK_Program : public Program {
-public:
-	void Run(void) {
-		if (cmd->FindString("SET",temp_line,false)) {
-			PIT_HACK_Set_type(temp_line);
+void TIMER_BIOS_INIT_Configure() {
+	PIC_RemoveEvents(PIT0_Event);
+	PIC_DeActivateIRQ(0);
+
+	/* Setup Timer 0 */
+	pit[0].cntr = 0x10000;
+	pit[0].write_state = 3;
+	pit[0].read_state = 3;
+	pit[0].read_latch = 0;
+	pit[0].write_latch = 0;
+	pit[0].mode = 3;
+	pit[0].bcd = false;
+	pit[0].go_read_latch = true;
+	pit[0].counterstatus_set = false;
+	pit[0].update_count = false;
+	pit[0].start = PIC_FullIndex();
+
+	pit[1].bcd = false;
+	pit[1].write_state = 1;
+	pit[1].read_state = 1;
+	pit[1].go_read_latch = true;
+	pit[1].cntr = 18;
+	pit[1].mode = 2;
+	pit[1].write_state = 3;
+	pit[1].counterstatus_set = false;
+	pit[1].start = PIC_FullIndex();
+
+	pit[2].bcd = false;
+	pit[2].write_state = 1;
+	pit[2].read_state = 1;
+	pit[2].go_read_latch = true;
+	pit[2].cntr = 18;
+	pit[2].mode = 2;
+	pit[2].write_state = 3;
+	pit[2].counterstatus_set = false;
+	pit[2].start = PIC_FullIndex();
+
+    /* TODO: I have observed that on real PC-98 hardware:
+     * 
+     *   Output 1 (speaker) does not cycle if inhibited by port 35h
+     *
+     *   Output 2 (RS232C) does not cycle until programmed to cycle
+     *   to operate the 8251 for data transfer. It is configured by
+     *   the BIOS to countdown and stop, thus the UART is not cycling
+     *   until put into active use. */
+
+    int pcspeaker_pit = IS_PC98_ARCH ? 1 : 2; /* IBM: PC speaker on output 2   PC-98: PC speaker on output 1 */
+
+	{
+		Section_prop *pcsec = static_cast<Section_prop *>(control->GetSection("speaker"));
+		int freq = pcsec->Get_int("initial frequency"); /* original code: 1320 */
+		int div;
+
+		if (freq < 19) {
+			div = 1;
 		}
+		else {
+			div = PIT_TICK_RATE / freq;
+			if (div > 65535) div = 65535;
+		}
+
+		pit[pcspeaker_pit].cntr = div;
+		pit[pcspeaker_pit].read_latch = div;
+		pit[pcspeaker_pit].write_state = 3; /* Chuck Yeager */
+		pit[pcspeaker_pit].read_state = 3;
+		pit[pcspeaker_pit].mode = 3;
+		pit[pcspeaker_pit].bcd = false;
+		pit[pcspeaker_pit].go_read_latch = true;
+		pit[pcspeaker_pit].counterstatus_set = false;
+		pit[pcspeaker_pit].counting = false;
+	    pit[pcspeaker_pit].start = PIC_FullIndex();
 	}
-};
 
-static void PITHACK_ProgramStart(Program * * make) {
-	*make=new PITHACK_Program;
+	pit[0].delay=(1000.0f/((float)PIT_TICK_RATE/(float)pit[0].cntr));
+	pit[1].delay=(1000.0f/((float)PIT_TICK_RATE/(float)pit[1].cntr));
+	pit[2].delay=(1000.0f/((float)PIT_TICK_RATE/(float)pit[2].cntr));
+
+	PCSPEAKER_SetCounter(pit[pcspeaker_pit].cntr,pit[pcspeaker_pit].mode);
+	PIC_AddEvent(PIT0_Event,pit[0].delay);
 }
 
-class TIMER:public Module_base{
-private:
-	IO_ReadHandleObject ReadHandler[4];
-	IO_WriteHandleObject WriteHandler[4];
-public:
-	TIMER(Section* configuration):Module_base(configuration){
-		Section_prop * section=static_cast<Section_prop *>(configuration);
+void TIMER_OnPowerOn(Section*) {
+	Section_prop * section=static_cast<Section_prop *>(control->GetSection("dosbox"));
+	assert(section != NULL);
 
-		WriteHandler[0].Install(0x40,write_latch,IO_MB);
-	//	WriteHandler[1].Install(0x41,write_latch,IO_MB);
-		WriteHandler[2].Install(0x42,write_latch,IO_MB);
-		WriteHandler[3].Install(0x43,write_p43,IO_MB);
-		ReadHandler[0].Install(0x40,read_latch,IO_MB);
-		ReadHandler[1].Install(0x41,read_latch,IO_MB);
-		ReadHandler[2].Install(0x42,read_latch,IO_MB);
-		/* Setup Timer 0 */
-		pit[0].cntr=0x10000;
-		pit[0].write_state = 3;
-		pit[0].read_state = 3;
-		pit[0].read_latch=0;
-		pit[0].write_latch=0;
-		pit[0].mode=3;
-		pit[0].bcd = false;
-		pit[0].go_read_latch = true;
-		pit[0].counterstatus_set = false;
-		pit[0].update_count = false;
-	
-		pit[1].bcd = false;
-		pit[1].write_state = 1;
-		pit[1].read_state = 1;
-		pit[1].go_read_latch = true;
-		pit[1].cntr = 18;
-		pit[1].mode = 2;
-		pit[1].write_state = 3;
-		pit[1].counterstatus_set = false;
-	
-		pit[2].read_latch=1320;	/* MadTv1 */
-		pit[2].write_state = 3; /* Chuck Yeager */
-		pit[2].read_state = 3;
-		pit[2].mode=3;
-		pit[2].bcd=false;   
-		pit[2].cntr=1320;
-		pit[2].go_read_latch=true;
-		pit[2].counterstatus_set = false;
-		pit[2].counting = false;
-	
-		pit[0].delay=(1000.0f/((float)PIT_TICK_RATE/(float)pit[0].cntr));
-		pit[1].delay=(1000.0f/((float)PIT_TICK_RATE/(float)pit[1].cntr));
-		pit[2].delay=(1000.0f/((float)PIT_TICK_RATE/(float)pit[2].cntr));
+	// log
+	LOG(LOG_MISC,LOG_DEBUG)("TIMER_OnPowerOn(): Reinitializing PIT timer emulation");
 
-		Prop_multival* p = section->Get_multival("pit hack");
-		std::string type = p->GetSection()->Get_string("type");
+	PIC_RemoveEvents(PIT0_Event);
 
-		PIT_HACK_Set_type(type);
-		PROGRAMS_MakeFile("PITHACK.COM",PITHACK_ProgramStart);
+	WriteHandler[0].Uninstall();
+	WriteHandler[1].Uninstall();
+	WriteHandler[2].Uninstall();
+	WriteHandler[3].Uninstall();
+	ReadHandler[0].Uninstall();
+	ReadHandler[1].Uninstall();
+	ReadHandler[2].Uninstall();
+	ReadHandler[3].Uninstall();
 
-		latched_timerstatus_locked=false;
-		gate2 = false;
-		PIC_AddEvent(PIT0_Event,pit[0].delay);
+	WriteHandler[0].Install(0x40,write_latch,IO_MB);
+//	WriteHandler[1].Install(0x41,write_latch,IO_MB);
+	WriteHandler[2].Install(0x42,write_latch,IO_MB);
+	WriteHandler[3].Install(0x43,write_p43,IO_MB);
+	ReadHandler[0].Install(0x40,read_latch,IO_MB);
+	ReadHandler[1].Install(0x41,read_latch,IO_MB);
+	ReadHandler[2].Install(0x42,read_latch,IO_MB);
+
+	latched_timerstatus_locked=false;
+	gate2 = false;
+}
+
+/* NTS: This comes in two phases because we're taking ports 0x71-0x77 which overlap
+ *      with ports 0x70-0x71 from CMOS emulation.
+ *
+ *      Phase 1 is where we unregister our I/O ports. CMOS emulation will do so as
+ *      well either before or after our callback procedure.
+ *
+ *      Phase 2 is where we can then claim the I/O ports without our claim getting
+ *      overwritten by CMOS emulation unregistering the I/O port. */
+
+void TIMER_OnEnterPC98_Phase1(Section*) {
+	PIC_RemoveEvents(PIT0_Event);
+
+	WriteHandler[0].Uninstall();
+	WriteHandler[1].Uninstall();
+	WriteHandler[2].Uninstall();
+	WriteHandler[3].Uninstall();
+	ReadHandler[0].Uninstall();
+	ReadHandler[1].Uninstall();
+	ReadHandler[2].Uninstall();
+	ReadHandler[3].Uninstall();
+}
+
+void TIMER_OnEnterPC98_Phase2(Section*) {
+	Section_prop * section=static_cast<Section_prop *>(control->GetSection("dosbox"));
+	assert(section != NULL);
+    int pc98rate;
+
+	PIC_RemoveEvents(PIT0_Event);
+
+	WriteHandler[0].Uninstall();
+	WriteHandler[1].Uninstall();
+	WriteHandler[2].Uninstall();
+	WriteHandler[3].Uninstall();
+	ReadHandler[0].Uninstall();
+	ReadHandler[1].Uninstall();
+	ReadHandler[2].Uninstall();
+	ReadHandler[3].Uninstall();
+
+    /* PC-98 has two different rates: 5/10MHz base or 8MHz base. Let the user choose via dosbox.conf */
+    pc98rate = section->Get_int("pc-98 timer master frequency");
+    if (pc98rate == 0) pc98rate = 10; /* Pick the most likely to work with DOS games (FIXME: This is a GUESS!! Is this correct?) */
+    else if (pc98rate < 9) pc98rate = 8;
+    else pc98rate = 10;
+
+    if (pc98rate >= 10)
+        PIT_TICK_RATE = PIT_TICK_RATE_PC98_10MHZ;
+    else
+        PIT_TICK_RATE = PIT_TICK_RATE_PC98_8MHZ;
+
+    LOG_MSG("PC-98 PIT master clock rate %luHz",PIT_TICK_RATE);
+
+    /* I/O port map (8254)
+     *
+     * IBM PC/XT/AT      NEC-PC98     A1-A0
+     * -----------------------------------
+     *  0x40              0x71        0
+     *  0x41              0x73        1
+     *  0x42              0x75        2
+     *  0x43              0x77        3
+     */
+    /* Timer output connection
+     * 
+     * IBM PC/XT/AT      NEC-PC98     Timer
+     * ------------------------------------
+     * Timer int.        Timer int.   0
+     * DRAM refresh      Speaker      1
+     * Speaker           RS-232C clk  2
+     *
+     * If I read documentation correctly, PC-98 wires timer output 2
+     * to the clock pin of the 8251 UART for COM1 as a way to set the
+     * baud rate. */
+
+    /* This code is written to eventually copy-paste out in general */
+	WriteHandler[0].Install(IS_PC98_ARCH ? 0x71 : 0x40,write_latch,IO_MB);
+	WriteHandler[1].Install(IS_PC98_ARCH ? 0x73 : 0x41,write_latch,IO_MB);
+	WriteHandler[2].Install(IS_PC98_ARCH ? 0x75 : 0x42,write_latch,IO_MB);
+	WriteHandler[3].Install(IS_PC98_ARCH ? 0x77 : 0x43,write_p43,IO_MB);
+	ReadHandler[0].Install(IS_PC98_ARCH ? 0x71 : 0x40,read_latch,IO_MB);
+	ReadHandler[1].Install(IS_PC98_ARCH ? 0x73 : 0x41,read_latch,IO_MB);
+	ReadHandler[2].Install(IS_PC98_ARCH ? 0x75 : 0x42,read_latch,IO_MB);
+
+    /* BIOS data area at 0x501 tells the DOS application which clock rate to use */
+    phys_writeb(0x501,
+        ((PIT_TICK_RATE == PIT_TICK_RATE_PC98_8MHZ) ? 0x80 : 0x00)      /* bit 7: 1=8MHz  0=5MHz/10MHz */
+    );
+
+	latched_timerstatus_locked=false;
+	gate2 = false;
+
+    TIMER_BIOS_INIT_Configure();
+}
+
+void TIMER_Destroy(Section*) {
+	PIC_RemoveEvents(PIT0_Event);
+}
+
+void TIMER_Init() {
+	Bitu i;
+
+	LOG(LOG_MISC,LOG_DEBUG)("TIMER_Init()");
+
+    PIT_TICK_RATE = PIT_TICK_RATE_IBM;
+
+	for (i=0;i < 3;i++) {
+		pit[i].cntr = 0x10000;
+		pit[i].write_state = 0;
+		pit[i].read_state = 0;
+		pit[i].read_latch = 0;
+		pit[i].write_latch = 0;
+		pit[i].mode = 0;
+		pit[i].bcd = false;
+		pit[i].go_read_latch = false;
+		pit[i].counterstatus_set = false;
+		pit[i].update_count = false;
+		pit[i].delay = (1000.0f/((float)PIT_TICK_RATE/(float)pit[i].cntr));
 	}
-	~TIMER(){
-		PIC_RemoveEvents(PIT0_Event);
-	}
-};
-static TIMER* test;
 
-void TIMER_Destroy(Section*){
-	delete test;
-}
-void TIMER_Init(Section* sec) {
-	test = new TIMER(sec);
-	sec->AddDestroyFunction(&TIMER_Destroy);
+	AddExitFunction(AddExitFunctionFuncPair(TIMER_Destroy));
+	AddVMEventFunction(VM_EVENT_POWERON,AddVMEventFunctionFuncPair(TIMER_OnPowerOn));
+	AddVMEventFunction(VM_EVENT_ENTER_PC98_MODE,AddVMEventFunctionFuncPair(TIMER_OnEnterPC98_Phase1));
+	AddVMEventFunction(VM_EVENT_ENTER_PC98_MODE_END,AddVMEventFunctionFuncPair(TIMER_OnEnterPC98_Phase2));
 }
 
-
-
-//save state support
-void *PIT0_Event_PIC_Event = (void*)PIT0_Event;
-
-
-namespace
-{
-class SerializeTimer : public SerializeGlobalPOD
-{
-public:
-    SerializeTimer() : SerializeGlobalPOD("IntTimer10")
-    {
-        registerPOD(pit);
-        registerPOD(gate2);
-        registerPOD(latched_timerstatus);
-		registerPOD(latched_timerstatus_locked);
-    }
-} dummy;
-}

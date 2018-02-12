@@ -29,6 +29,10 @@
 #include "paging.h"
 #include "mmx.h"
 
+#define CPU_CORE CPU_ARCHTYPE_386
+
+#define DoString DoString_Normal
+
 extern bool ignore_opcode_63;
 
 #if C_DEBUG
@@ -143,9 +147,14 @@ static INLINE Bit32u Fetchd() {
 
 #define EALookupTable (core.ea_table)
 
+extern Bitu dosbox_check_nonrecursive_pf_cs;
+extern Bitu dosbox_check_nonrecursive_pf_eip;
+
 Bits CPU_Core_Normal_Run(void) {
 	while (CPU_Cycles-->0) {
 		LOADIP;
+		dosbox_check_nonrecursive_pf_cs = SegValue(cs);
+		dosbox_check_nonrecursive_pf_eip = reg_eip;
 		core.opcode_index=cpu.code.big*0x200;
 		core.prefixes=cpu.code.big;
 		core.ea_table=&EATable[cpu.code.big*256];
@@ -183,10 +192,14 @@ restart_opcode:
 					writecode+=2;
 				}
 				if (!ignore)
-				LOG(LOG_CPU,LOG_NORMAL)("Illegal/Unhandled opcode %s",tempcode);
+					LOG(LOG_CPU,LOG_NORMAL)("Illegal/Unhandled opcode %s",tempcode);
 			}
 #endif
 			CPU_Exception(6,0);
+			continue;
+		gp_fault:
+			LOG_MSG("Segment limit violation");
+			CPU_Exception(EXCEPTION_GP,0);
 			continue;
 		}
 		SAVEIP;

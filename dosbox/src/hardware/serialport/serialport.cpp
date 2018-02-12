@@ -27,6 +27,7 @@
 #include "setup.h"
 #include "bios.h"					// SetComPorts(..)
 #include "callback.h"				// CALLBACK_Idle
+#include "control.h"
 
 #include "serialport.h"
 #include "serialmouse.h"
@@ -34,6 +35,7 @@
 #include "serialdummy.h"
 #include "softmodem.h"
 #include "nullmodem.h"
+#include "seriallog.h"
 
 #include "cpu.h"
 
@@ -206,7 +208,7 @@ void CSerial::log_ser(bool active, char const* format,...) {
 		// copied from DEBUG_SHOWMSG
 		char buf[512];
 		buf[0]=0;
-		sprintf(buf,"%12.3f [% 7u] ",PIC_FullIndex(), SDL_GetTicks());
+		sprintf(buf,"%12.3f [%7u] ",PIC_FullIndex(), SDL_GetTicks());
 		va_list msg;
 		va_start(msg,format);
 		vsprintf(buf+strlen(buf),format,msg);
@@ -275,8 +277,13 @@ void CSerial::handleEvent(Bit16u type) {
 		case SERIAL_ERRMSG_EVENT: {
 			LOG_MSG("Serial%d: Errors: "\
 				"Framing %d, Parity %d, Overrun RX:%d (IF0:%d), TX:%d, Break %d",
-				COMNUMBER, framingErrors, parityErrors, overrunErrors,
-				overrunIF0,txOverrunErrors, breakErrors);
+				(int)COMNUMBER,
+				(int)framingErrors,
+				(int)parityErrors,
+				(int)overrunErrors,
+				(int)overrunIF0,
+				(int)txOverrunErrors,
+				(int)breakErrors);
 			errormsg_pending=false;
 			framingErrors=0;
 			parityErrors=0;
@@ -1076,6 +1083,15 @@ CSerial::CSerial(Bitu id, CommandLine* cmd) {
 	idnumber=id;
 	Bit16u base = serial_baseaddr[id];
 
+    d_cts=false;		// bit0: deltaCTS
+    d_dsr=false;		// bit1: deltaDSR
+    d_ri=false;			// bit2: deltaRI
+    d_cd=false;			// bit3: deltaCD
+    cts=false;			// bit4: CTS
+    dsr=false;			// bit5: DSR
+    ri=false;			// bit6: RI
+    cd=false;			// bit7: CD
+
 	irq = serial_defaultirq[id];
 	getBituSubstring("irq:",&irq, cmd);
 	if (irq < 2 || irq > 15) irq = serial_defaultirq[id];
@@ -1120,9 +1136,7 @@ CSerial::CSerial(Bitu id, CommandLine* cmd) {
 	rxfifo = new MyFifo(fifosize);
 	txfifo = new MyFifo(fifosize);
 
-	mydosdevice=new device_COM(this);
-	DOS_AddDevice(mydosdevice);
-
+	mydosdevice=NULL;
 	errormsg_pending=false;
 	framingErrors=0;
 	parityErrors=0;
@@ -1141,15 +1155,31 @@ bool CSerial::getBituSubstring(const char* name,Bitu* data, CommandLine* cmd) {
 	std::string tmpstring;
 	if(!(cmd->FindStringBegin(name,tmpstring,false))) return false;
 	const char* tmpchar=tmpstring.c_str();
-	if(sscanf(tmpchar,"%u",data)!=1) return false;
+
+	unsigned int tmp;
+	if(sscanf(tmpchar,"%u",&tmp)!=1) return false;
+	*data = (Bitu)tmp;
 	return true;
 }
 
-CSerial::~CSerial(void) {
-	if (mydosdevice != NULL) {
-		DOS_DelDevice(mydosdevice);
-		mydosdevice = NULL;
+void CSerial::registerDOSDevice() {
+	if (mydosdevice == NULL) {
+		LOG(LOG_MISC,LOG_DEBUG)("COM%d: Registering DOS device",(int)idnumber+1);
+		mydosdevice = new device_COM(this);
+		DOS_AddDevice(mydosdevice);
 	}
+}
+
+void CSerial::unregisterDOSDevice() {
+	if (mydosdevice != NULL) {
+		LOG(LOG_MISC,LOG_DEBUG)("COM%d: Unregistering DOS device",(int)idnumber+1);
+		DOS_DelDevice(mydosdevice); // deletes the pointer for us!
+		mydosdevice=NULL;
+	}
+}
+
+CSerial::~CSerial(void) {
+	unregisterDOSDevice();
 	for(Bitu i = 0; i <= SERIAL_BASE_EVENT_COUNT; i++)
 		removeEvent(i);
 
@@ -1234,13 +1264,44 @@ bool CSerial::Putchar(Bit8u data, bool wait_dsr, bool wait_cts, Bitu timeout) {
 	return true;
 }
 
-/* ints/bios.cpp */
 void BIOS_PnP_ComPortRegister(Bitu port,Bitu irq);
+void BIOS_SetCOMPort(Bitu port, Bit16u baseaddr);
+
+void BIOS_Post_register_comports_PNP() {
+	unsigned int i;
+
+	for (i=0;i < 4;i++) {
+		if (serialports[i] != NULL) {
+			BIOS_PnP_ComPortRegister(serial_baseaddr[i],serialports[i]->irq);
+		}
+	}
+}
+
+Bitu bios_post_comport_count() {
+	Bitu count = 0;
+	unsigned int i;
+
+	for (i=0;i < 4;i++) {
+		if (serialports[i] != NULL)
+			count++;
+	}
+
+	return count;
+}
+
+/* at BIOS POST stage, write serial ports to bios data area */
+void BIOS_Post_register_comports() {
+	unsigned int i;
+
+	for (i=0;i < 4;i++) {
+		if (serialports[i] != NULL)
+			BIOS_SetCOMPort(i,serial_baseaddr[i]);
+	}
+}
 
 class SERIALPORTS:public Module_base {
 public:
 	SERIALPORTS (Section * configuration):Module_base (configuration) {
-		Bit16u biosParameter[4] = { 0, 0, 0, 0 };
 		Section_prop *section = static_cast <Section_prop*>(configuration);
 
 		char s_property[] = "serialx"; 
@@ -1254,6 +1315,9 @@ public:
 			// detect the type
 			if (type=="dummy") {
 				serialports[i] = new CSerialDummy (i, &cmd);
+			}
+			else if (type=="log") {
+				serialports[i] = new CSerialLog (i, &cmd);
 			}
 			else if (type=="serialmouse") {
 				serialports[i] = new CSerialMouse (i, &cmd);
@@ -1288,14 +1352,9 @@ public:
 				serialports[i] = NULL;
 			} else {
 				serialports[i] = NULL;
-				LOG_MSG("Invalid type for serial%d",i+1);
-			}
-			if(serialports[i]) {
-				biosParameter[i] = serial_baseaddr[i];
-				BIOS_PnP_ComPortRegister(serial_baseaddr[i],serialports[i]->irq);
+				LOG_MSG("Invalid type for serial%d",(int)i+1);
 			}
 		} // for 1-4
-		BIOS_SetComPorts (biosParameter);
 	}
 
 	~SERIALPORTS () {
@@ -1310,17 +1369,83 @@ public:
 static SERIALPORTS *testSerialPortsBaseclass;
 
 void SERIAL_Destroy (Section * sec) {
-	delete testSerialPortsBaseclass;
-	testSerialPortsBaseclass = NULL;
+	if (testSerialPortsBaseclass) {
+		LOG(LOG_MISC,LOG_DEBUG)("Deleting serial port base class");
+		delete testSerialPortsBaseclass;
+		testSerialPortsBaseclass = NULL;
+	}
 }
 
-void SERIAL_Init (Section * sec) {
+void SERIAL_OnPowerOn (Section * sec) {
 	// should never happen
+	LOG(LOG_MISC,LOG_DEBUG)("Reinitializing serial emulation");
 	if (testSerialPortsBaseclass) delete testSerialPortsBaseclass;
-	testSerialPortsBaseclass = new SERIALPORTS (sec);
-	sec->AddDestroyFunction (&SERIAL_Destroy, true);
+	testSerialPortsBaseclass = new SERIALPORTS (control->GetSection("serial"));
 }
 
+void SERIAL_OnDOSKernelInit (Section * sec) {
+	unsigned int i;
 
-// save state support
-void *Serial_EventHandler_PIC_Event = (void*)Serial_EventHandler;
+	LOG(LOG_MISC,LOG_DEBUG)("DOS kernel initializing, creating COMx devices");
+
+	for (i=0;i < 3;i++) {
+		if (serialports[i] != NULL)
+			serialports[i]->registerDOSDevice();
+	}
+}
+
+void SERIAL_OnDOSKernelExit (Section * sec) {
+	unsigned int i;
+
+	for (i=0;i < 3;i++) {
+		if (serialports[i] != NULL)
+			serialports[i]->unregisterDOSDevice();
+	}
+}
+
+void SERIAL_OnReset (Section * sec) {
+	unsigned int i;
+
+	// FIXME: Unregister/destroy the DOS devices, but consider that the DOS kernel at reset is gone.
+	for (i=0;i < 3;i++) {
+		if (serialports[i] != NULL)
+			serialports[i]->unregisterDOSDevice();
+	}
+}
+
+void SERIAL_OnEnterPC98Mode (Section * sec) {
+    // TODO: PC-98 systems do have serial port(s).
+    //
+    //       I will update the code to match when I better understand them.
+    //
+    //       Note that up to two different chipsets are involved.
+    //
+    //       COM1 is usually an Intel 8251, which is completely different from the 8250/16550 used on IBM PC.
+    //
+    //       COM2 however, is usually an 16550.
+	unsigned int i;
+
+	for (i=0;i < 3;i++) {
+		if (serialports[i] != NULL)
+			serialports[i]->unregisterDOSDevice();
+	}
+
+    if (testSerialPortsBaseclass) {
+		LOG(LOG_MISC,LOG_DEBUG)("Deleting serial port base class");
+		delete testSerialPortsBaseclass;
+		testSerialPortsBaseclass = NULL;
+	}
+}
+
+void SERIAL_Init () {
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing serial port emulation");
+
+	AddExitFunction(AddExitFunctionFuncPair(SERIAL_Destroy),true);
+	AddVMEventFunction(VM_EVENT_POWERON,AddVMEventFunctionFuncPair(SERIAL_OnPowerOn));
+	AddVMEventFunction(VM_EVENT_RESET,AddVMEventFunctionFuncPair(SERIAL_OnReset));
+	AddVMEventFunction(VM_EVENT_DOS_EXIT_BEGIN,AddVMEventFunctionFuncPair(SERIAL_OnDOSKernelExit));
+	AddVMEventFunction(VM_EVENT_DOS_INIT_KERNEL_READY,AddVMEventFunctionFuncPair(SERIAL_OnDOSKernelInit));
+
+	AddVMEventFunction(VM_EVENT_ENTER_PC98_MODE,AddVMEventFunctionFuncPair(SERIAL_OnEnterPC98Mode));
+}
+

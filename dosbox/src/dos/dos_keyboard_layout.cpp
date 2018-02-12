@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2002-2015  The DOSBox Team
+ *  Copyright (C) 2002-2013  The DOSBox Team
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -28,6 +28,7 @@
 #include "mapper.h"
 #include "drives.h"
 #include "dos_inc.h"
+#include "control.h"
 
 #include "dos_codepages.h"
 #include "dos_keyboard_layout_data.h"
@@ -613,7 +614,7 @@ bool keyboard_layout::map_key(Bitu key, Bit16u layouted_key, bool is_command, bo
 }
 
 Bit16u keyboard_layout::extract_codepage(const char* keyboard_file_name) {
-	if (!strcmp(keyboard_file_name,"none")) return 437;
+	if (!strcmp(keyboard_file_name,"none")) return (IS_PC98_ARCH ? 932 : 437);
 
 	Bit32u read_buf_size;
 	static Bit8u read_buf[65535];
@@ -657,7 +658,7 @@ Bit16u keyboard_layout::extract_codepage(const char* keyboard_file_name) {
 		} else {
 			start_pos=0;
 			LOG(LOG_BIOS,LOG_ERROR)("Keyboard layout file %s not found",keyboard_file_name);
-			return 437;
+			return (IS_PC98_ARCH ? 932 : 437);
 		}
 		if (tempfile) {
 			fseek(tempfile, start_pos+2, SEEK_SET);
@@ -670,7 +671,7 @@ Bit16u keyboard_layout::extract_codepage(const char* keyboard_file_name) {
 		Bit32u dr=(Bit32u)fread(read_buf, sizeof(Bit8u), 4, tempfile);
 		if ((dr<4) || (read_buf[0]!=0x4b) || (read_buf[1]!=0x4c) || (read_buf[2]!=0x46)) {
 			LOG(LOG_BIOS,LOG_ERROR)("Invalid keyboard layout file %s",keyboard_file_name);
-			return 437;
+			return (IS_PC98_ARCH ? 932 : 437);
 		}
 
 		fseek(tempfile, 0, SEEK_SET);
@@ -694,7 +695,7 @@ Bit16u keyboard_layout::extract_codepage(const char* keyboard_file_name) {
 
 		if (submap_cp!=0) return submap_cp;
 	}
-	return 437;
+	return (IS_PC98_ARCH ? 932 : 437);
 }
 
 Bitu keyboard_layout::read_codepage_file(const char* codepage_file_name, Bit32s codepage_id) {
@@ -894,9 +895,9 @@ Bitu keyboard_layout::read_codepage_file(const char* codepage_file_name, Bit32s 
 		if ((device_type==0x0001) && (font_type==0x0001) && (font_codepage==codepage_id)) {
 			// valid/matching codepage found
 
-			Bit16u number_of_fonts,font_data_length;
+			Bit16u number_of_fonts;//,font_data_length;
 			number_of_fonts=host_readw(&cpi_buf[font_data_header_pt+0x02]);
-			font_data_length=host_readw(&cpi_buf[font_data_header_pt+0x04]);
+//			font_data_length=host_readw(&cpi_buf[font_data_header_pt+0x04]);
 
 			bool font_changed=false;
 			Bit32u font_data_start=font_data_header_pt+0x06;
@@ -1092,7 +1093,7 @@ class DOS_KeyboardLayout: public Module_base {
 public:
 	DOS_KeyboardLayout(Section* configuration):Module_base(configuration){
 		Section_prop * section=static_cast<Section_prop *>(configuration);
-		dos.loaded_codepage=437;	// US codepage already initialized
+		dos.loaded_codepage=(IS_PC98_ARCH ? 932 : 437);	// US codepage already initialized
 		loaded_layout=new keyboard_layout();
 
 		const char * layoutname=section->Get_string("keyboardlayout");
@@ -1132,7 +1133,7 @@ public:
 					break;
 				case 1031:
 					layoutname = "gr";
-					wants_dos_codepage = 437;
+					wants_dos_codepage = (IS_PC98_ARCH ? 932 : 437);
 					break;
 				case 1033:
 					// US
@@ -1142,15 +1143,15 @@ public:
 					break;
 				case 1034:
 					layoutname = "sp";
-					wants_dos_codepage = 437;
+					wants_dos_codepage = (IS_PC98_ARCH ? 932 : 437);
 					break;
 				case 1035:
 					layoutname = "su";
-					wants_dos_codepage = 437;
+					wants_dos_codepage = (IS_PC98_ARCH ? 932 : 437);
 					break;
 				case 1036:
 					layoutname = "fr";
-					wants_dos_codepage = 437;
+					wants_dos_codepage = (IS_PC98_ARCH ? 932 : 437);
 					break;
 				case 1038:
 					if (cur_kb_subID==1) layoutname = "hu";
@@ -1161,11 +1162,11 @@ public:
 					break;
 				case 1040:
 					layoutname = "it";
-					wants_dos_codepage = 437;
+					wants_dos_codepage = (IS_PC98_ARCH ? 932 : 437);
 					break;
 				case 1043:
 					layoutname = "nl";
-					wants_dos_codepage = 437;
+					wants_dos_codepage = (IS_PC98_ARCH ? 932 : 437);
 					break;
 				case 1044:
 					layoutname = "no";
@@ -1175,14 +1176,14 @@ public:
 					break;
 				case 1046:
 					layoutname = "br";
-					wants_dos_codepage = 437;
+					wants_dos_codepage = (IS_PC98_ARCH ? 932 : 437);
 					break;
 /*				case 1048:
 					layoutname = "ro446";
 					break; */
 				case 1049:
 					layoutname = "ru";
-					wants_dos_codepage = 437;
+					wants_dos_codepage = (IS_PC98_ARCH ? 932 : 437);
 					break;
 				case 1050:
 					layoutname = "hr";
@@ -1195,14 +1196,14 @@ public:
 					break; */
 				case 1053:
 					layoutname = "sv";
-					wants_dos_codepage = 437;
+					wants_dos_codepage = (IS_PC98_ARCH ? 932 : 437);
 					break;
 				case 1055:
 					layoutname = "tr";
 					break;
 				case 1058:
 					layoutname = "ur";
-					wants_dos_codepage = 437;
+					wants_dos_codepage = (IS_PC98_ARCH ? 932 : 437);
 					break;
 				case 1059:
 					layoutname = "bl";
@@ -1230,14 +1231,17 @@ public:
 					break; */
 				case 2055:
 					layoutname = "sg";
-					wants_dos_codepage = 437;
+					wants_dos_codepage = (IS_PC98_ARCH ? 932 : 437);
 					break;
 				case 2070:
 					layoutname = "po";
 					break;
 				case 4108:
 					layoutname = "sf";
-					wants_dos_codepage = 437;
+					wants_dos_codepage = (IS_PC98_ARCH ? 932 : 437);
+					break;
+				case 1041:
+					layoutname = "jp";
 					break;
 				default:
 					break;
@@ -1274,9 +1278,9 @@ public:
 	}
 
 	~DOS_KeyboardLayout(){
-		if ((dos.loaded_codepage!=437) && (CurMode->type==M_TEXT)) {
+		if ((dos.loaded_codepage!=(IS_PC98_ARCH ? 932 : 437)) && (CurMode->type==M_TEXT)) {
 			INT10_ReloadRomFonts();
-			dos.loaded_codepage=437;	// US codepage
+			dos.loaded_codepage=(IS_PC98_ARCH ? 932 : 437);	// US codepage
 		}
 		if (loaded_layout) {
 			delete loaded_layout;
@@ -1288,11 +1292,24 @@ public:
 static DOS_KeyboardLayout* test;
 
 void DOS_KeyboardLayout_ShutDown(Section* /*sec*/) {
-	delete test;	
+	if (test != NULL) {
+		delete test;
+		test = NULL;
+	}
 }
 
-void DOS_KeyboardLayout_Init(Section* sec) {
-	test = new DOS_KeyboardLayout(sec);
-	sec->AddDestroyFunction(&DOS_KeyboardLayout_ShutDown,true);
-//	MAPPER_AddHandler(switch_keyboard_layout,MK_f2,MMOD1|MMOD2,"sw_layout","Switch Layout");
+void DOS_KeyboardLayout_Startup(Section* sec) {
+	if (test == NULL) {
+		LOG(LOG_MISC,LOG_DEBUG)("Reinitializing DOS keyboard layout support");
+		test = new DOS_KeyboardLayout(control->GetSection("dos"));
+	}
 }
+
+void DOS_KeyboardLayout_Init() {
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing DOS keyboard layout emulation");
+
+	AddExitFunction(AddExitFunctionFuncPair(DOS_KeyboardLayout_ShutDown),true);
+	AddVMEventFunction(VM_EVENT_RESET,AddVMEventFunctionFuncPair(DOS_KeyboardLayout_ShutDown));
+	AddVMEventFunction(VM_EVENT_DOS_EXIT_BEGIN,AddVMEventFunctionFuncPair(DOS_KeyboardLayout_ShutDown));
+}
+

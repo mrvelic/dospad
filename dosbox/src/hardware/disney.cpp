@@ -18,6 +18,7 @@
 
 
 #include <string.h>
+#include <algorithm>
 #include "dosbox.h"
 #include "inout.h"
 #include "mixer.h"
@@ -25,9 +26,11 @@
 #include "setup.h"
 #include "bios.h"
 #include "mem.h"
-#include "../save_state.h"
+#include "control.h"
 
-#define DISNEY_BASE 0x0378
+using namespace std;
+
+unsigned int DISNEY_BASE = 0x0378;
 
 #define DISNEY_SIZE 128
 
@@ -85,6 +88,9 @@ static void DISNEY_enable(Bitu freq) {
 	if(freq < 500 || freq > 100000) {
 		// try again..
 		disney.state = DS_IDLE;
+#if 0
+		LOG(LOG_MISC,LOG_NORMAL)("disney enable rejected, %ld Hz, stereo=%u",(long)freq,(int)disney.stereo);
+#endif
 		return;	
 	} else {
 #if 0
@@ -136,13 +142,17 @@ static void DISNEY_analyze(Bitu channel){
 			Bitu ch_speed[2];
 
 			for(Bitu i = 0; i < 2; i++) {
-				ch_speed[i] = (Bitu)(1.0/((disney.da[i].speedcheck_sum/1000.0) /
-				(float)(((float)disney.da[i].used)-1.0))); // -1.75
+				if (disney.da[i].used > 1/*avoid divide-by-zero!*/) {
+					ch_speed[i] = (Bitu)(1.0/((disney.da[i].speedcheck_sum/1000.0) /
+						(float)(((float)disney.da[i].used)-1.0))); // -1.75
+				}
+				else {
+					ch_speed[i] = 0;
+				}
 			}
-			
+
 			// choose the larger value
-			DISNEY_enable(ch_speed[0] > ch_speed[1]?
-				ch_speed[0]:ch_speed[1]); // TODO
+			DISNEY_enable(max(ch_speed[0],ch_speed[1]));
 			break;
 		}
 		case DS_ANALYZING:
@@ -184,7 +194,6 @@ static void disney_write(Bitu port,Bitu val,Bitu iolen) {
 	disney.last_used=PIC_Ticks;
 	switch (port-DISNEY_BASE) {
 	case 0:		/* Data Port */
-	//case 0x330-DISNEY_BASE:
 	{
 		disney.data=val;
 		// if data is written here too often without using the stereo
@@ -203,7 +212,7 @@ static void disney_write(Bitu port,Bitu val,Bitu iolen) {
 		break;
 	}
 	case 1:		/* Status Port */		
-		LOG(LOG_MISC,LOG_NORMAL)("DISNEY:Status write %x",val);
+		LOG(LOG_MISC,LOG_NORMAL)("DISNEY:Status write %x",(int)val);
 		break;
 	case 2:		/* Control Port */
 		if((disney.control & 0x2) && !(val & 0x2)) {
@@ -296,6 +305,7 @@ static void DISNEY_PlayStereo(Bitu len, Bit8u* l, Bit8u* r) {
 
 static void DISNEY_CallBack(Bitu len) {
 	if (!len) return;
+	if (disney.leader == NULL) return;
 
 	// get the smaller used
 	Bitu real_used;
@@ -374,9 +384,14 @@ public:
 	DISNEY(Section* configuration):Module_base(configuration) {
 		Section_prop * section=static_cast<Section_prop *>(configuration);
 		if(!section->Get_bool("disney")) return;
-		if(mem_readw(BIOS_ADDRESS_LPT1) != 0) return;
-		BIOS_SetLPTPort(0,0x378);
-	
+
+		for(int i = 0; i < 2; i++) {
+			disney.da[i].used = 0;
+			disney.da[i].speedcheck_sum = 0;
+			disney.da[i].speedcheck_failed = false;
+			disney.da[i].speedcheck_init = false;
+		}
+
 		WriteHandler.Install(DISNEY_BASE,disney_write,IO_MB,3);
 		ReadHandler.Install(DISNEY_BASE,disney_read,IO_MB,3);
 		// see above //WriteHandler_cvm.Install(0x330,disney_write,IO_MB,1);
@@ -388,8 +403,6 @@ public:
 		disney.mo = new MixerObject();
 		disney.chan=disney.mo->Install(&DISNEY_CallBack,10000,"DISNEY");
 		DISNEY_disable(0);
-
-
 	}
 	~DISNEY(){
 		CPU_Snap_Back_To_Real_Mode();
@@ -403,176 +416,53 @@ public:
 	}
 };
 
-static DISNEY* test;
+static DISNEY* test = NULL;
 
 static void DISNEY_ShutDown(Section* sec){
-	delete test;
+    if (test) {
+        delete test;
+        test = NULL;
+    }
 }
 
-void DISNEY_Init(Section* sec) {
-	test = new DISNEY(sec);
-	sec->AddDestroyFunction(&DISNEY_ShutDown,true);
+static void DISNEY_OnEnterPC98(Section* sec){
+    if (test) {
+        delete test;
+        test = NULL;
+    }
 }
 
+Bitu DISNEY_BasePort() {
+	return DISNEY_BASE;
+}
 
+bool DISNEY_ShouldInit() {
+	Section_prop *sec = (Section_prop*)control->GetSection("speaker");
+	return sec->Get_bool("disney");
+}
 
-// save state support
-void *DISNEY_disable_PIC_Event = (void*)DISNEY_disable;
+bool DISNEY_HasInit() {
+	return (test != NULL);
+}
 
-
-void POD_Save_Disney( std::ostream& stream )
-{
-	const char pod_name[32] = "Disney";
-
-	if( stream.fail() ) return;
-	if( !test ) return;
-	if( !disney.chan ) return;
-
-
-	WRITE_POD( &pod_name, pod_name );
-
-	//************************************************
-	//************************************************
-	//************************************************
-
-	Bit8u dac_leader_idx;
-
-
-	dac_leader_idx = 0xff;
-	for( int lcv=0; lcv<2; lcv++ ) {
-		if( disney.leader == &disney.da[lcv] ) { dac_leader_idx = lcv; break; }
+// parallel port init code will call this depending on port allocation and config.
+void DISNEY_Init(unsigned int base_port) {
+	if (test == NULL) {
+		DISNEY_BASE = base_port;
+		LOG(LOG_MISC,LOG_DEBUG)("Allocating Disney Sound emulation on port %xh",DISNEY_BASE);
+		test = new DISNEY(control->GetSection("speaker"));
 	}
-
-	// *******************************************
-	// *******************************************
-
-	// - near-pure struct data
-	WRITE_POD( &disney, disney );
-
-	// *******************************************
-	// *******************************************
-
-	// - reloc ptr
-	WRITE_POD( &dac_leader_idx, dac_leader_idx );
-
-	// *******************************************
-	// *******************************************
-
-	disney.chan->SaveState(stream);
 }
 
+void DISNEY_Init() {
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing Disney Sound Source emulation");
 
-void POD_Load_Disney( std::istream& stream )
-{
-	char pod_name[32] = {0};
+	AddExitFunction(AddExitFunctionFuncPair(DISNEY_ShutDown),true);
 
-	if( stream.fail() ) return;
-	if( !test ) return;
-	if( !disney.chan ) return;
-
-
-	// error checking
-	READ_POD( &pod_name, pod_name );
-	if( strcmp( pod_name, "Disney" ) ) {
-		stream.clear( std::istream::failbit | std::istream::badbit );
-		return;
-	}
-
-	//************************************************
-	//************************************************
-	//************************************************
-
-	Bit8u dac_leader_idx;
-	MixerObject *mo_old;
-	MixerChannel *chan_old;
-
-
-	// save old ptrs
-	mo_old = disney.mo;
-	chan_old = disney.chan;
-
-	// *******************************************
-	// *******************************************
-
-	// - near-pure struct data
-	READ_POD( &disney, disney );
-
-	// *******************************************
-	// *******************************************
-
-	// - reloc ptr
-	READ_POD( &dac_leader_idx, dac_leader_idx );
-
-
-	disney.leader = NULL;
-	if( dac_leader_idx != 0xff ) disney.leader = &disney.da[dac_leader_idx];
-
-	// *******************************************
-	// *******************************************
-
-	// restore old ptrs
-	disney.mo = mo_old;
-	disney.chan = chan_old;
-
-
-	disney.chan->LoadState(stream);
+    /* FIXME: We *could* emulate a Disney Sound Source / LPT DAC / etc. attached to the parallel port
+     *        of a PC-98 system, but, since this code attaches to the I/O ports to emulate the hardware
+     *        we have to disable it in PC-98 mode until such time that this code can remap to emulate
+     *        the PC-98's printer port. */
+    AddVMEventFunction(VM_EVENT_ENTER_PC98_MODE,AddVMEventFunctionFuncPair(DISNEY_OnEnterPC98));
 }
 
-
-/*
-ykhwong svn-daum 2012-02-20
-
-
-static globals:
-
-
-static struct disney
-
-	// - pure data
-	Bit8u data;
-	Bit8u status;
-	Bit8u control;
-	dac_channel da[2];
-
-		// - pure data
-		Bit8u buffer[DISNEY_SIZE];
-		Bitu used;
-		double speedcheck_sum;
-		double speedcheck_last;
-		bool speedcheck_failed;
-		bool speedcheck_init;
-
-
-	// - pure data
-	Bitu last_used;
-
-
-	// - static 'new' ptrs
-	MixerObject * mo;
-	MixerChannel * chan;
-
-
-	// - pure data
-	bool stereo;
-
-
-	// - reloc ptr (!!!)
-	dac_channel* leader;
-
-
-	// - pure data
-	Bitu state;
-	Bitu interface_det;
-	Bitu interface_det_ext;
-
-
-
-// - static 'new' ptr
-static DISNEY* test;
-
-	// - static data
-	IO_ReadHandleObject ReadHandler;
-	IO_WriteHandleObject WriteHandler;
-	IO_WriteHandleObject WriteHandler_cvm;
-	//MixerObject MixerChan;
-*/

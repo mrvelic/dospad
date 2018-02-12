@@ -29,7 +29,6 @@
 #include "drives.h" //Wildcmp
 /* Include all the devices */
 
-#include "../save_state.h"
 #include "dev_con.h"
 
 
@@ -40,15 +39,15 @@ public:
 	device_NUL() { SetName("NUL"); };
 	virtual bool Read(Bit8u * data,Bit16u * size) {
 		*size = 0; //Return success and no data read. 
-		LOG(LOG_IOCTL,LOG_NORMAL)("%s:READ",GetName());
+//		LOG(LOG_IOCTL,LOG_NORMAL)("%s:READ",GetName());
 		return true;
 	}
 	virtual bool Write(Bit8u * data,Bit16u * size) {
-		LOG(LOG_IOCTL,LOG_NORMAL)("%s:WRITE",GetName());
+//		LOG(LOG_IOCTL,LOG_NORMAL)("%s:WRITE",GetName());
 		return true;
 	}
 	virtual bool Seek(Bit32u * pos,Bit32u type) {
-		LOG(LOG_IOCTL,LOG_NORMAL)("%s:SEEK",GetName());
+//		LOG(LOG_IOCTL,LOG_NORMAL)("%s:SEEK",GetName());
 		return true;
 	}
 	virtual bool Close() { return true; }
@@ -228,9 +227,12 @@ void DOS_ShutdownDevices(void) {
 	}
 }
 
+// INT 29h emulation needs to keep track of CON
+DOS_Device *DOS_CON = NULL;
+
 void DOS_SetupDevices(void) {
 	DOS_Device * newdev;
-	newdev=new device_CON();
+	newdev=new device_CON(); DOS_CON = newdev;
 	DOS_AddDevice(newdev);
 	DOS_Device * newdev2;
 	newdev2=new device_NUL();
@@ -240,18 +242,3 @@ void DOS_SetupDevices(void) {
 	DOS_AddDevice(newdev3);
 }
 
-
-
-// save state support
-void POD_Save_DOS_Devices( std::ostream& stream )
-{
-	if( strcmp( Devices[2]->GetName(), "CON" ) == 0 )
-		Devices[2]->SaveState(stream);
-}
-
-
-void POD_Load_DOS_Devices( std::istream& stream )
-{
-	if( strcmp( Devices[2]->GetName(), "CON" ) == 0 )
-		Devices[2]->LoadState(stream);
-}

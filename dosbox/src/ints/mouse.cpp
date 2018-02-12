@@ -35,32 +35,66 @@
 #include "int10.h"
 #include "bios.h"
 #include "dos_inc.h"
-#include "../save_state.h"
 #include "support.h"
 #include "setup.h"
- 
+#include "control.h"
+
 /* ints/bios.cpp */
 void bios_enable_ps2();
 
 /* hardware/keyboard.cpp */
 void AUX_INT33_Takeover();
 int KEYBOARD_AUX_Active();
-void KEYBOARD_AUX_Event(float x,float y,Bitu buttons);
+void KEYBOARD_AUX_Event(float x,float y,Bitu buttons,int scrollwheel);
 
 bool en_int33=false;
 bool en_bios_ps2mouse=false;
+
 void DisableINT33() {
 	if (en_int33) {
+		LOG(LOG_MISC,LOG_DEBUG)("Disabling INT 33 services");
+
 		en_int33 = false;
 		/* TODO: Also unregister INT 33h handler */
 	}
 }
 
+void CALLBACK_DeAllocate(Bitu in);
 
-static Bitu call_int33,call_int74,int74_ret_callback,call_mouse_bd;
+static Bitu int74_ret_callback = 0;
+static Bitu call_mouse_bd = 0;
+static Bitu call_int33 = 0;
+static Bitu call_int74 = 0;
+static Bitu call_ps2 = 0;
+
+void MOUSE_Unsetup_DOS(void) {
+    if (call_mouse_bd != 0) {
+        CALLBACK_DeAllocate(call_mouse_bd);
+        call_mouse_bd = 0;
+    }
+    if (call_int33 != 0) {
+        CALLBACK_DeAllocate(call_int33);
+        call_int33 = 0;
+    }
+}
+
+void MOUSE_Unsetup_BIOS(void) {
+    if (int74_ret_callback != 0) {
+        CALLBACK_DeAllocate(int74_ret_callback);
+        int74_ret_callback = 0;
+    }
+    if (call_int74 != 0) {
+        CALLBACK_DeAllocate(call_int74);
+        call_int74 = 0;
+    }
+    if (call_ps2 != 0) {
+        CALLBACK_DeAllocate(call_ps2);
+        call_ps2 = 0;
+    }
+}
+
 static Bit16u ps2cbseg,ps2cbofs;
 static bool useps2callback,ps2callbackinit;
-static Bitu call_ps2;
 static RealPt ps2_callback;
 static Bit16s oldmouseX, oldmouseY;
 // forward
@@ -74,9 +108,12 @@ struct button_event {
 	Bit8u buttons;
 };
 
+extern uint8_t p7fd8_8255_mouse_int_enable;
+
+static uint8_t MOUSE_IRQ = 12; // IBM PC/AT default
+
 #define QUEUE_SIZE 32
 #define MOUSE_BUTTONS 3
-#define MOUSE_IRQ 12
 #define POS_X (static_cast<Bit16s>(mouse.x) & mouse.gran_x)
 #define POS_Y (static_cast<Bit16s>(mouse.y) & mouse.gran_y)
 
@@ -154,6 +191,7 @@ static struct {
 	bool in_UIR;
 	Bit8u mode;
 	Bit16s gran_x,gran_y;
+	int scrollwheel;
 } mouse;
 
 bool Mouse_SetPS2State(bool use) {
@@ -239,14 +277,24 @@ Bitu PS2_Handler(void) {
 #define MOUSE_RIGHT_RELEASED 16
 #define MOUSE_MIDDLE_PRESSED 32
 #define MOUSE_MIDDLE_RELEASED 64
+#define MOUSE_DUMMY 128
 #define MOUSE_DELAY 5.0
 
 void MOUSE_Limit_Events(Bitu /*val*/) {
 	mouse.timer_in_progress = false;
+
+    if (IS_PC98_ARCH) {
+        if (mouse.events>0) {
+            mouse.events--;
+        }
+    }
+
 	if (mouse.events) {
 		mouse.timer_in_progress = true;
 		PIC_AddEvent(MOUSE_Limit_Events,MOUSE_DELAY);
-		PIC_ActivateIRQ(MOUSE_IRQ);
+
+        if (!IS_PC98_ARCH || (IS_PC98_ARCH && p7fd8_8255_mouse_int_enable))
+		    PIC_ActivateIRQ(MOUSE_IRQ);
 	}
 }
 
@@ -268,15 +316,21 @@ INLINE void Mouse_AddEvent(Bit8u type) {
 	if (!mouse.timer_in_progress) {
 		mouse.timer_in_progress = true;
 		PIC_AddEvent(MOUSE_Limit_Events,MOUSE_DELAY);
-		PIC_ActivateIRQ(MOUSE_IRQ);
-	}
+
+        if (!IS_PC98_ARCH || (IS_PC98_ARCH && p7fd8_8255_mouse_int_enable))
+            PIC_ActivateIRQ(MOUSE_IRQ);
+    }
+}
+
+void MOUSE_DummyEvent(void) {
+    Mouse_AddEvent(MOUSE_DUMMY);
 }
 
 // ***************************************************************************
 // Mouse cursor - text mode
 // ***************************************************************************
 /* Write and read directly to the screen. Do no use int_setcursorpos (LOTUS123) */
-extern void WriteChar(Bit16u col,Bit16u row,Bit8u page,Bit8u chr,Bit8u attr,bool useattr);
+extern void WriteChar(Bit16u col,Bit16u row,Bit8u page,Bit16u chr,Bit8u attr,bool useattr);
 extern void ReadCharAttr(Bit16u col,Bit16u row,Bit8u page,Bit16u * result);
 
 void RestoreCursorBackgroundText() {
@@ -487,14 +541,17 @@ void DrawCursor() {
 	RestoreVgaRegisters();
 }
 
+void pc98_mouse_movement_apply(int x,int y);
+
 /* FIXME: Re-test this code */
 void Mouse_CursorMoved(float xrel,float yrel,float x,float y,bool emulate) {
 	extern bool Mouse_Vertical;
 	float dx = xrel * mouse.pixelPerMickey_x;
 	float dy = (Mouse_Vertical?-yrel:yrel) * mouse.pixelPerMickey_y;
 
-	if (KEYBOARD_AUX_Active()) {
-		KEYBOARD_AUX_Event(xrel,yrel,mouse.buttons);
+	if (!IS_PC98_ARCH && KEYBOARD_AUX_Active()) {
+		KEYBOARD_AUX_Event(xrel,yrel,mouse.buttons,mouse.scrollwheel);
+		mouse.scrollwheel = 0;
 		return;
 	}
 
@@ -533,6 +590,9 @@ void Mouse_CursorMoved(float xrel,float yrel,float x,float y,bool emulate) {
 		}
 	}
 
+    if (IS_PC98_ARCH)
+        pc98_mouse_movement_apply(xrel,yrel);
+
 	/* ignore constraints if using PS2 mouse callback in the bios */
 
 	if (mouse.x > mouse.max_x) mouse.x = mouse.max_x;
@@ -550,8 +610,12 @@ void Mouse_CursorMoved(float xrel,float yrel,float x,float y,bool emulate) {
 	Mouse_AddEvent(MOUSE_HAS_MOVED);
 }
 
+uint8_t Mouse_GetButtonState(void) {
+	return mouse.buttons;
+}
+
 void Mouse_ButtonPressed(Bit8u button) {
-	if (KEYBOARD_AUX_Active()) {
+	if (!IS_PC98_ARCH && KEYBOARD_AUX_Active()) {
 		switch (button) {
 			case 0:
 				mouse.buttons|=1;
@@ -566,9 +630,13 @@ void Mouse_ButtonPressed(Bit8u button) {
 				return;
 		}
 
-		KEYBOARD_AUX_Event(0,0,mouse.buttons);
+		KEYBOARD_AUX_Event(0,0,mouse.buttons,mouse.scrollwheel);
+		mouse.scrollwheel = 0;
 		return;
 	}
+
+	if (button > 2)
+		return;
 
 	switch (button) {
 #if (MOUSE_BUTTONS >= 1)
@@ -601,7 +669,7 @@ void Mouse_ButtonPressed(Bit8u button) {
 }
 
 void Mouse_ButtonReleased(Bit8u button) {
-	if (KEYBOARD_AUX_Active()) {
+	if (!IS_PC98_ARCH && KEYBOARD_AUX_Active()) {
 		switch (button) {
 			case 0:
 				mouse.buttons&=~1;
@@ -612,13 +680,23 @@ void Mouse_ButtonReleased(Bit8u button) {
 			case 2:
 				mouse.buttons&=~4;
 				break;
+			case (100-1):	/* scrollwheel up */
+				mouse.scrollwheel -= 8;
+				break;
+			case (100+1):	/* scrollwheel down */
+				mouse.scrollwheel += 8;
+				break;
 			default:
 				return;
 		}
 
-		KEYBOARD_AUX_Event(0,0,mouse.buttons);
+		KEYBOARD_AUX_Event(0,0,mouse.buttons,mouse.scrollwheel);
+		mouse.scrollwheel = 0;
 		return;
 	}
+
+	if (button > 2)
+		return;
 
 	switch (button) {
 #if (MOUSE_BUTTONS >= 1)
@@ -678,6 +756,9 @@ static void Mouse_SetSensitivity(Bit16u px, Bit16u py, Bit16u dspeed){
 
 static void Mouse_ResetHardware(void){
 	PIC_SetIRQMask(MOUSE_IRQ,false);
+
+    if (IS_PC98_ARCH)
+        p7fd8_8255_mouse_int_enable = 1;
 }
 
 //Does way to much. Many things should be moved to mouse reset one day
@@ -696,9 +777,14 @@ void Mouse_NewVideoMode(void) {
 	case 0x07: {
 		mouse.gran_x = (mode<2)?0xfff0:0xfff8;
 		mouse.gran_y = (Bit16s)0xfff8;
-		Bitu rows = real_readb(BIOSMEM_SEG,BIOSMEM_NB_ROWS);
-		if ((rows == 0) || (rows > 250)) rows = 25 - 1;
-		mouse.max_y = 8*(rows+1) - 1;
+        if (IS_PC98_ARCH) {
+            mouse.max_y = 400 - 1;
+        }
+        else {
+            Bitu rows = real_readb(BIOSMEM_SEG,BIOSMEM_NB_ROWS);
+            if ((rows == 0) || (rows > 250)) rows = 25 - 1;
+            mouse.max_y = 8*(rows+1) - 1;
+        }
 		break;
 	}
 	case 0x04:
@@ -1152,51 +1238,28 @@ Bitu MOUSE_UserInt_CB_Handler(void) {
 
 bool MouseTypeNone();
 
-void MOUSE_Init(Section* sec) {
-	Section_prop *section=static_cast<Section_prop *>(sec);
-	RealPt i33loc=0;
+void MOUSE_ShutDown(Section *sec) {
+}
 
-	if (en_int33=section->Get_bool("int33")) {
-		LOG(LOG_KEYBOARD,LOG_NORMAL)("INT 33H emulation enabled");
-	}
+void BIOS_PS2MOUSE_ShutDown(Section *sec) {
+}
+
+void BIOS_PS2Mouse_Startup(Section *sec) {
+	Section_prop *section=static_cast<Section_prop *>(control->GetSection("dos"));
 
 	/* NTS: This assumes MOUSE_Init() is called after KEYBOARD_Init() */
-	if (en_bios_ps2mouse=section->Get_bool("biosps2")) {
-		if (MouseTypeNone()) {
-			LOG(LOG_KEYBOARD,LOG_WARN)("INT 15H PS/2 emulation NOT enabled. biosps2=1 but mouse type=none");
-		}
-		else {
-			LOG(LOG_KEYBOARD,LOG_NORMAL)("INT 15H PS/2 emulation enabled");
-			bios_enable_ps2();
-		}
+	en_bios_ps2mouse = section->Get_bool("biosps2");
+	if (!en_bios_ps2mouse) return;
+
+	if (MouseTypeNone()) {
+		LOG(LOG_KEYBOARD,LOG_WARN)("INT 15H PS/2 emulation NOT enabled. biosps2=1 but mouse type=none");
+	}
+	else {
+		LOG(LOG_KEYBOARD,LOG_NORMAL)("INT 15H PS/2 emulation enabled");
+		bios_enable_ps2();
 	}
 
 	ps2_callback_save_regs = section->Get_bool("int15 mouse callback does not preserve registers");
-
-	if (en_int33) {
-	// Callback for mouse interrupt 0x33
-	call_int33=CALLBACK_Allocate();
-		// i33loc=RealMake(CB_SEG+1,(call_int33*CB_SIZE)-0x10);
-		i33loc=RealMake(DOS_GetMemory(0x1,"i33loc")-1,0x10);
-	CALLBACK_Setup(call_int33,&INT33_Handler,CB_MOUSE,Real2Phys(i33loc),"Mouse");
-	// Wasteland needs low(seg(int33))!=0 and low(ofs(int33))!=0
-	real_writed(0,0x33<<2,i33loc);
-	}
-	else {
-		call_int33=0;
-	}
-
-	call_mouse_bd=CALLBACK_Allocate();
-	CALLBACK_Setup(call_mouse_bd,&MOUSE_BD_Handler,CB_RETF8,
-		PhysMake(RealSeg(i33loc),RealOff(i33loc)+2),"MouseBD");
-	// pseudocode for CB_MOUSE (including the special backdoor entry point):
-	//	jump near i33hd
-	//	callback MOUSE_BD_Handler
-	//	retf 8
-	//  label i33hd:
-	//	callback INT33_Handler
-	//	iret
-
 
 	// Callback for ps2 irq
 	call_int74=CALLBACK_Allocate();
@@ -1231,11 +1294,45 @@ void MOUSE_Init(Section* sec) {
  	call_ps2=CALLBACK_Allocate();
 	CALLBACK_Setup(call_ps2,&PS2_Handler,CB_RETF,"ps2 bios callback");
 	ps2_callback=CALLBACK_RealPointer(call_ps2);
+}
+
+void MOUSE_Startup(Section *sec) {
+	Section_prop *section=static_cast<Section_prop *>(control->GetSection("dos"));
+	RealPt i33loc=0;
+
+	/* TODO: Needs to check for mouse, and fail to do anything if neither PS/2 nor serial mouse emulation enabled */
+
+	en_int33=section->Get_bool("int33");
+	if (!en_int33) return;
+
+	LOG(LOG_KEYBOARD,LOG_NORMAL)("INT 33H emulation enabled");
+
+	// Callback for mouse interrupt 0x33
+	call_int33=CALLBACK_Allocate();
+
+	// i33loc=RealMake(CB_SEG+1,(call_int33*CB_SIZE)-0x10);
+	i33loc=RealMake(DOS_GetMemory(0x1,"i33loc")-1,0x10);
+	CALLBACK_Setup(call_int33,&INT33_Handler,CB_MOUSE,Real2Phys(i33loc),"Mouse");
+
+	// Wasteland needs low(seg(int33))!=0 and low(ofs(int33))!=0
+	real_writed(0,0x33<<2,i33loc);
+
+	call_mouse_bd=CALLBACK_Allocate();
+	CALLBACK_Setup(call_mouse_bd,&MOUSE_BD_Handler,CB_RETF8,
+		PhysMake(RealSeg(i33loc),RealOff(i33loc)+2),"MouseBD");
+	// pseudocode for CB_MOUSE (including the special backdoor entry point):
+	//	jump near i33hd
+	//	callback MOUSE_BD_Handler
+	//	retf 8
+	//  label i33hd:
+	//	callback INT33_Handler
+	//	iret
 
 	memset(&mouse,0,sizeof(mouse));
 	mouse.hidden = 1; //Hide mouse on startup
 	mouse.timer_in_progress = false;
 	mouse.mode = 0xFF; //Non existing mode
+	mouse.scrollwheel = 0;
 
    	mouse.sub_mask=0;
 	mouse.sub_seg=0x6362;	// magic value
@@ -1249,225 +1346,24 @@ void MOUSE_Init(Section* sec) {
 	Mouse_SetSensitivity(50,50,50);
 }
 
-
-
-//save state support
-void *MOUSE_Limit_Events_PIC_Event = (void*)MOUSE_Limit_Events;
-
-
-namespace
-{
-class SerializeMouse : public SerializeGlobalPOD
-{
-public:
-	SerializeMouse() : SerializeGlobalPOD("Mouse")
-	{}
-
-private:
-	virtual void getBytes(std::ostream& stream)
-	{
-		Bit8u screenMask_idx, cursorMask_idx;
-
-
-		if( mouse.screenMask == defaultScreenMask ) screenMask_idx = 0x00;
-		else if( mouse.screenMask == userdefScreenMask ) screenMask_idx = 0x01;
-
-		if( mouse.cursorMask == defaultCursorMask ) cursorMask_idx = 0x00;
-		else if( mouse.cursorMask == userdefCursorMask ) cursorMask_idx = 0x01;
-
-		//*******************************************
-		//*******************************************
-		//*******************************************
-
-		SerializeGlobalPOD::getBytes(stream);
-
-
-		// - pure data
-		WRITE_POD( &ps2cbseg, ps2cbseg );
-		WRITE_POD( &ps2cbofs, ps2cbofs );
-		WRITE_POD( &useps2callback, useps2callback );
-		WRITE_POD( &ps2callbackinit, ps2callbackinit );
-		
-		WRITE_POD( &userdefScreenMask, userdefScreenMask );
-		WRITE_POD( &userdefCursorMask, userdefCursorMask );
-
-
-		// - near-pure data
-		WRITE_POD( &mouse, mouse );
-
-
-		// - pure data
-		WRITE_POD( &gfxReg3CE, gfxReg3CE );
-		WRITE_POD( &index3C4, index3C4 );
-		WRITE_POD( &gfxReg3C5, gfxReg3C5 );
-
-		//*******************************************
-		//*******************************************
-		//*******************************************
-
-		// - reloc ptr
-		WRITE_POD( &screenMask_idx, screenMask_idx );
-		WRITE_POD( &cursorMask_idx, cursorMask_idx );
-	}
-
-	virtual void setBytes(std::istream& stream)
-	{
-		Bit8u screenMask_idx, cursorMask_idx;
-
-		//*******************************************
-		//*******************************************
-		//*******************************************
-
-		SerializeGlobalPOD::setBytes(stream);
-
-
-		// - pure data
-		READ_POD( &ps2cbseg, ps2cbseg );
-		READ_POD( &ps2cbofs, ps2cbofs );
-		READ_POD( &useps2callback, useps2callback );
-		READ_POD( &ps2callbackinit, ps2callbackinit );
-		
-		READ_POD( &userdefScreenMask, userdefScreenMask );
-		READ_POD( &userdefCursorMask, userdefCursorMask );
-
-
-		// - near-pure data
-		READ_POD( &mouse, mouse );
-
-
-		// - pure data
-		READ_POD( &gfxReg3CE, gfxReg3CE );
-		READ_POD( &index3C4, index3C4 );
-		READ_POD( &gfxReg3C5, gfxReg3C5 );
-
-		//*******************************************
-		//*******************************************
-		//*******************************************
-
-		// - reloc ptr
-		READ_POD( &screenMask_idx, screenMask_idx );
-		READ_POD( &cursorMask_idx, cursorMask_idx );
-
-
-		if( screenMask_idx == 0x00 ) mouse.screenMask = defaultScreenMask;
-		else if( screenMask_idx == 0x01 ) mouse.screenMask = userdefScreenMask;
-
-		if( cursorMask_idx == 0x00 ) mouse.cursorMask = defaultCursorMask;
-		else if( cursorMask_idx == 0x01 ) mouse.cursorMask = userdefCursorMask;
-
-		//*******************************************
-		//*******************************************
-		//*******************************************
-
-		// reset
-		oldmouseX = static_cast<Bit16s>(mouse.x);
-		oldmouseY = static_cast<Bit16s>(mouse.y);
-	}
-} dummy;
+void MOUSE_OnEnterPC98(Section *sec) {
 }
 
+void MOUSE_OnEnterPC98_phase2(Section *sec) {
+    // PC-98 change mouse to IRQ 13 (same as Neko Project II)
+    MOUSE_IRQ = 13; // NTS: Based on NKII pic_setirq(0x0D)
+    PIC_SetIRQMask(MOUSE_IRQ,true);
 
+    // FIXME: This doesn't explain why Puyo Puyo sets up an interrupt handler
+    //        that blows up and hangs if IRQ 5 is fired... what's that about? --J.C.
+}
 
-/*
-ykhwong svn-daum 2012-02-20
+void MOUSE_Init() {
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing mouse interface emulation");
 
-// - system data
-static Bitu call_int33,call_int74,int74_ret_callback,call_mouse_bd;
+	// TODO: We need a DOSBox shutdown callback, and we need a shutdown callback for when the DOS kernel begins to unload and on system reset
+	AddVMEventFunction(VM_EVENT_RESET,AddVMEventFunctionFuncPair(MOUSE_ShutDown));
+	AddVMEventFunction(VM_EVENT_ENTER_PC98_MODE,AddVMEventFunctionFuncPair(MOUSE_OnEnterPC98));
+	AddVMEventFunction(VM_EVENT_ENTER_PC98_MODE_END,AddVMEventFunctionFuncPair(MOUSE_OnEnterPC98_phase2));
+}
 
-// - pure data
-static Bit16u ps2cbseg,ps2cbofs;
-static bool useps2callback,ps2callbackinit;
-
-// - system data
-static Bitu call_ps2;
-static RealPt ps2_callback;
-
-// - system data
-static Bit16s oldmouseX, oldmouseY;
-static Bit16u defaultTextAndMask = 0x77FF;
-static Bit16u defaultTextXorMask = 0x7700;
-static Bit16u defaultScreenMask[CURSORY] = {
-		0x3FFF, 0x1FFF, 0x0FFF, 0x07FF,
-		0x03FF, 0x01FF, 0x00FF, 0x007F,
-		0x003F, 0x001F, 0x01FF, 0x00FF,
-		0x30FF, 0xF87F, 0xF87F, 0xFCFF
-};
-static Bit16u defaultCursorMask[CURSORY] = {
-		0x0000, 0x4000, 0x6000, 0x7000,
-		0x7800, 0x7C00, 0x7E00, 0x7F00,
-		0x7F80, 0x7C00, 0x6C00, 0x4600,
-		0x0600, 0x0300, 0x0300, 0x0000
-};
-
-
-// - pure data
-static Bit16u userdefScreenMask[CURSORY];
-static Bit16u userdefCursorMask[CURSORY];
-
-
-// - near-pure data
-static struct mouse
-	// - pure data
-	Bit8u buttons;
-	Bit16u times_pressed[MOUSE_BUTTONS];
-	Bit16u times_released[MOUSE_BUTTONS];
-	Bit16u last_released_x[MOUSE_BUTTONS];
-	Bit16u last_released_y[MOUSE_BUTTONS];
-	Bit16u last_pressed_x[MOUSE_BUTTONS];
-	Bit16u last_pressed_y[MOUSE_BUTTONS];
-	Bit16u hidden;
-	float add_x,add_y;
-	Bit16s min_x,max_x,min_y,max_y;
-	float mickey_x,mickey_y;
-	float x,y;
-	button_event event_queue[QUEUE_SIZE];
-		Bit8u type;
-		Bit8u buttons;
-
-	Bit8u events;
-	Bit16u sub_seg,sub_ofs;
-	Bit16u sub_mask;
-
-	bool	background;
-	Bit16s	backposx, backposy;
-	Bit8u	backData[CURSORX*CURSORY];
-
-
-	// - reloc ptr (!!!)
-	Bit16u*	screenMask;
-	Bit16u* cursorMask;
-
-
-	// - pure data
-	Bit16s	clipx,clipy;
-	Bit16s  hotx,hoty;
-	Bit16u  textAndMask, textXorMask;
-
-	float	mickeysPerPixel_x;
-	float	mickeysPerPixel_y;
-	float	pixelPerMickey_x;
-	float	pixelPerMickey_y;
-	Bit16u	senv_x_val;
-	Bit16u	senv_y_val;
-	Bit16u	dspeed_val;
-	float	senv_x;
-	float	senv_y;
-	Bit16u  updateRegion_x[2];
-	Bit16u  updateRegion_y[2];
-	Bit16u  doubleSpeedThreshold;
-	Bit16u  language;
-	Bit16u  cursorType;
-	Bit16u	oldhidden;
-	Bit8u  page;
-	bool enabled;
-	bool inhibit_draw;
-	bool timer_in_progress;
-	bool in_UIR;
-	Bit8u mode;
-	Bit16s gran_x,gran_y;
-
-
-// - pure data
-static Bit8u gfxReg3CE[9];
-static Bit8u index3C4,gfxReg3C5;
-*/

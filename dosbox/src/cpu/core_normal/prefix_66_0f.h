@@ -56,7 +56,7 @@
 				}
 				break;
 			default:
-				LOG(LOG_CPU,LOG_ERROR)("GRP6:Illegal call %2X",which);
+				LOG(LOG_CPU,LOG_ERROR)("GRP6:Illegal call %2X",(int)which);
 				goto illegal_opcode;
 			}
 		}
@@ -111,7 +111,7 @@
 					if (CPU_LMSW(*eard)) RUNEXCEPTION();
 					break;
 				default:
-					LOG(LOG_CPU,LOG_ERROR)("Illegal group 7 RM subfunction %d",which);
+					LOG(LOG_CPU,LOG_ERROR)("Illegal group 7 RM subfunction %d",(int)which);
 					goto illegal_opcode;
 					break;
 				}
@@ -144,6 +144,57 @@
 			*rmrd=(Bit32u)limit;
 		}
 		break;
+
+	// Pentium Pro
+	CASE_0F_D(0x40)												/* CMOVO */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond32(TFLG_O); break;
+	CASE_0F_D(0x41)												/* CMOVNO */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond32(TFLG_NO); break;
+	CASE_0F_D(0x42)												/* CMOVB */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond32(TFLG_B); break;
+	CASE_0F_D(0x43)												/* CMOVNB */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond32(TFLG_NB); break;
+	CASE_0F_D(0x44)												/* CMOVZ */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond32(TFLG_Z); break;
+	CASE_0F_D(0x45)												/* CMOVNZ */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond32(TFLG_NZ); break;
+	CASE_0F_D(0x46)												/* CMOVBE */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond32(TFLG_BE); break;
+	CASE_0F_D(0x47)												/* CMOVNBE */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond32(TFLG_NBE); break;
+	CASE_0F_D(0x48)												/* CMOVS */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond32(TFLG_S); break;
+	CASE_0F_D(0x49)												/* CMOVNS */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond32(TFLG_NS); break;
+	CASE_0F_D(0x4A)												/* CMOVP */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond32(TFLG_P); break;
+	CASE_0F_D(0x4B)												/* CMOVNP */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond32(TFLG_NP); break;
+	CASE_0F_D(0x4C)												/* CMOVL */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond32(TFLG_L); break;
+	CASE_0F_D(0x4D)												/* CMOVNL */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond32(TFLG_NL); break;
+	CASE_0F_D(0x4E)												/* CMOVLE */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond32(TFLG_LE); break;
+	CASE_0F_D(0x4F)												/* CMOVNLE */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond32(TFLG_NLE); break;
+
 	CASE_0F_D(0x80)												/* JO */
 		JumpCond32_d(TFLG_O);break;
 	CASE_0F_D(0x81)												/* JNO */
@@ -439,6 +490,23 @@
 			else {GetEAa;*rmrd=LoadMd(eaa);SaveMd(eaa,LoadMd(eaa)+oldrmrd);}
 			break;
 		}
+    CASE_0F_D(0xc7)
+        {
+            extern bool enable_cmpxchg8b;
+            void CPU_CMPXCHG8B(PhysPt eaa);
+
+            if (!enable_cmpxchg8b || CPU_ArchitectureType<CPU_ARCHTYPE_PENTIUM) goto illegal_opcode;
+            GetRM;
+            if (((rm >> 3) & 7) == 1) { // CMPXCHG8B /1 r/m
+                if (rm >= 0xc0 ) goto illegal_opcode;
+                GetEAa;
+                CPU_CMPXCHG8B(eaa);
+            }
+            else {
+                goto illegal_opcode;
+            }
+            break;
+        }
 	CASE_0F_D(0xc8)												/* BSWAP EAX */
 		if (CPU_ArchitectureType<CPU_ARCHTYPE_486OLD) goto illegal_opcode;
 		BSWAPD(reg_eax);break;

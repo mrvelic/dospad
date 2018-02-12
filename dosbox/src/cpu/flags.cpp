@@ -25,7 +25,6 @@
 #include "cpu.h"
 #include "lazyflags.h"
 #include "pic.h"
-#include "../save_state.h"
 
 LazyFlags lflags;
 
@@ -120,7 +119,7 @@ Bit32u get_CF(void) {
 	case t_DIV:
 		return false;	/* Unkown */
 	default:
-		LOG(LOG_CPU,LOG_ERROR)("get_CF Unknown %d",lflags.type);
+		LOG(LOG_CPU,LOG_ERROR)("get_CF Unknown %d",(int)lflags.type);
 	}
 	return 0;
 }
@@ -202,7 +201,7 @@ Bit32u get_AF(void) {
 	case t_MUL:
 		return false;			          /* Unkown */
 	default:
-		LOG(LOG_CPU,LOG_ERROR)("get_AF Unknown %d",lflags.type);
+		LOG(LOG_CPU,LOG_ERROR)("get_AF Unknown %d",(int)lflags.type);
 	}
 	return 0;
 }
@@ -271,7 +270,7 @@ Bit32u get_ZF(void) {
 	case t_MUL:
 		return false;		/* Unkown */
 	default:
-		LOG(LOG_CPU,LOG_ERROR)("get_ZF Unknown %d",lflags.type);
+		LOG(LOG_CPU,LOG_ERROR)("get_ZF Unknown %d",(int)lflags.type);
 	}
 	return false;
 }
@@ -339,7 +338,7 @@ Bit32u get_SF(void) {
 	case t_MUL:
 		return false;	/* Unkown */
 	default:
-		LOG(LOG_CPU,LOG_ERROR)("get_SF Unkown %d",lflags.type);
+		LOG(LOG_CPU,LOG_ERROR)("get_SF Unkown %d",(int)lflags.type);
 	}
 	return false;
 
@@ -427,10 +426,13 @@ Bit32u get_OF(void) {
 	case t_DIV:
 		return false;		/* Unkown */
 	default:
-		LOG(LOG_CPU,LOG_ERROR)("get_OF Unkown %d",lflags.type);
+		LOG(LOG_CPU,LOG_ERROR)("get_OF Unkown %d",(int)lflags.type);
 	}
 	return false;
 }
+
+#define PARITY16(x)  (parity_lookup[((x)>>8)&0xff]^parity_lookup[(x)&0xff]^FLAG_PF)
+#define PARITY32(x)  (PARITY16((x)&0xffff)^PARITY16(((x)>>16)&0xffff)^FLAG_PF)
 
 Bit16u parity_lookup[256] = {
   FLAG_PF, 0, 0, FLAG_PF, 0, FLAG_PF, FLAG_PF, 0, 0, FLAG_PF, FLAG_PF, 0, FLAG_PF, 0, 0, FLAG_PF,
@@ -455,6 +457,26 @@ Bit32u get_PF(void) {
 	switch (lflags.type) {
 	case t_UNKNOWN:
 		return GETFLAG(PF);
+	case t_XORd:
+	case t_ADDd:
+	case t_SUBd:
+	case t_ANDd:
+	case t_ADCd:
+	case t_SHRd:
+	case t_SHLd:
+	case t_SARd:
+	case t_ORd:
+		return	PARITY32(lf_resd);
+	case t_XORw:
+	case t_ADDw:
+	case t_SUBw:
+	case t_ANDw:
+	case t_ADCw:
+	case t_SHRw:
+	case t_SHLw:
+	case t_SARw:
+	case t_ORw:
+		return	PARITY16(lf_resw);
 	default:
 		return	(parity_lookup[lf_resb]);
 	};
@@ -691,7 +713,7 @@ Bitu FillFlags(void) {
 		else SET_FLAG(CF,(lf_var1b >> (8-lf_var2b)) & 1);
 		DOFLAG_ZFb;
 		DOFLAG_SFb;
-		SET_FLAG(OF,(lf_resb ^ lf_var1b) & 0x80);
+		SET_FLAG(OF,(lf_resb >> 7) ^ GETFLAG(CF)); /* MSB of result XOR CF. WARNING: This only works because FLAGS_CF == 1 */
 		DOFLAG_PF;
 		SET_FLAG(AF,(lf_var2b&0x1f));
 		break;
@@ -700,7 +722,7 @@ Bitu FillFlags(void) {
 		else SET_FLAG(CF,(lf_var1w >> (16-lf_var2b)) & 1);
 		DOFLAG_ZFw;
 		DOFLAG_SFw;
-		SET_FLAG(OF,(lf_resw ^ lf_var1w) & 0x8000);
+		SET_FLAG(OF,(lf_resw >> 15) ^ GETFLAG(CF)); /* MSB of result XOR CF. WARNING: This only works because FLAGS_CF == 1 */
 		DOFLAG_PF;
 		SET_FLAG(AF,(lf_var2w&0x1f));
 		break;
@@ -708,7 +730,7 @@ Bitu FillFlags(void) {
 		SET_FLAG(CF,(lf_var1d >> (32 - lf_var2b)) & 1);
 		DOFLAG_ZFd;
 		DOFLAG_SFd;
-		SET_FLAG(OF,(lf_resd ^ lf_var1d) & 0x80000000);
+		SET_FLAG(OF,(lf_resd >> 31) ^ GETFLAG(CF)); /* MSB of result XOR CF. WARNING: This only works because FLAGS_CF == 1 */
 		DOFLAG_PF;
 		SET_FLAG(AF,(lf_var2d&0x1f));
 		break;
@@ -875,7 +897,7 @@ Bitu FillFlags(void) {
 		break;
 
 	default:
-		LOG(LOG_CPU,LOG_ERROR)("Unhandled flag type %d",lflags.type);
+		LOG(LOG_CPU,LOG_ERROR)("Unhandled flag type %d",(int)lflags.type);
 		return 0;
 	}
 	lflags.type=t_UNKNOWN;
@@ -1176,7 +1198,7 @@ void FillFlagsNoCFOF(void) {
 		break;
 
 	default:
-		LOG(LOG_CPU,LOG_ERROR)("Unhandled flag type %d",lflags.type);
+		LOG(LOG_CPU,LOG_ERROR)("Unhandled flag type %d",(int)lflags.type);
 		break;
 	}
 	lflags.type=t_UNKNOWN;
@@ -1188,40 +1210,3 @@ void DestroyConditionFlags(void) {
 
 #endif
 
-
-
-// save state support
-void POD_Save_CPU_Flags( std::ostream& stream )
-{
-	// - pure data
-	WRITE_POD( &lflags, lflags );
-}
-
-
-void POD_Load_CPU_Flags( std::istream& stream )
-{
-	// - pure data
-	READ_POD( &lflags, lflags );
-}
-
-
-/*
-ykhwong svn-daum 2012-02-20
-
-
-static globals:
-
-
-struct LazyFlags lflags;
-	// - pure data
-	GenReg32 var1,var2,res;
-		union GenReg32 {
-			Bit32u dword[1];
-			Bit16u word[2];
-			Bit8u byte[4];
-		};
-
-	Bitu type;
-	Bitu prev_type;
-	Bitu oldcf;
-*/

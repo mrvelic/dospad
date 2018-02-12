@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2002-2015  The DOSBox Team
+ *  Copyright (C) 2002-2013  The DOSBox Team
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -64,10 +64,15 @@ enum KBD_KEYS {
 	KBD_kor_hancha,		/* Hancha */
 	KBD_kor_hanyong,	/* Han/yong */
 
+	/* for Japanese A01 (106) key [http://www.mediafire.com/download/t968ydz6ky92myl/dosbox74.zip] */
+	/* see reference image [https://upload.wikimedia.org/wikipedia/commons/thumb/b/bc/KB_Japanese.svg/1280px-KB_Japanese.svg.png] */
+	KBD_jp_yen, KBD_jp_backslash,
+
 	KBD_LAST
 };
 
 void KEYBOARD_ClrBuffer(void);
 void KEYBOARD_AddKey(KBD_KEYS keytype,bool pressed);
+size_t KEYBOARD_BufferSpaceAvail();  // emendelson from dbDOS
 
 #endif

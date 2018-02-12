@@ -42,6 +42,13 @@
 #define DOS_TEMPSIZE 1024
 
 enum {
+    CPM_COMPAT_OFF=0,
+    CPM_COMPAT_MSDOS2,
+    CPM_COMPAT_MSDOS5,
+    CPM_COMPAT_DIRECT
+};
+
+enum {
 	DOS_ATTR_READ_ONLY=	0x01,
 	DOS_ATTR_HIDDEN=	0x02,
 	DOS_ATTR_SYSTEM=	0x04,
@@ -60,7 +67,7 @@ struct FileStat_Block {
 
 class DOS_DTA;
 
-#ifdef _MSC_VER /* Shaddup MSVC! */
+#ifdef WIN32 /* Shaddup MSVC! */
 # define stricmp _stricmp
 #endif
 
@@ -87,9 +94,6 @@ public:
 	virtual Bit32u	GetSeekPos()	{ return 0xffffffff; }
 	void SetDrive(Bit8u drv) { hdrive=drv;}
 	Bit8u GetDrive(void) { return hdrive;}
-
-	virtual void SaveState( std::ostream& stream );
-	virtual void LoadState( std::istream& stream );
 
 	char* name;
 	Bit8u drive;
@@ -127,8 +131,6 @@ public:
 	virtual Bit16u	GetInformation(void);
 	virtual bool	ReadFromControlChannel(PhysPt bufptr,Bit16u size,Bit16u * retcode);
 	virtual bool	WriteToControlChannel(PhysPt bufptr,Bit16u size,Bit16u * retcode);
-	virtual void SaveState( std::ostream& stream ) {}
-	virtual void LoadState( std::istream& stream ) {}
 	void SetDeviceNumber(Bitu num) { devnum=num;}
 private:
 	Bitu devnum;
@@ -266,6 +268,8 @@ public:
 	virtual const char * GetInfo(void);
 	char * GetBaseDir(void);
 
+    bool readonly;
+    bool nocachedir;
 	char curdir[DOS_PATHLENGTH];
 	char info[256];
 	/* Can be overridden for example in iso images */
@@ -275,9 +279,6 @@ public:
 	virtual void MediaChange() {};
 	// disk cycling functionality (request resources)
 	virtual void Activate(void) {};
-
-	virtual void SaveState( std::ostream& stream );
-	virtual void LoadState( std::istream& stream );
 };
 
 enum { OPEN_READ=0, OPEN_WRITE=1, OPEN_READWRITE=2, OPEN_READ_NO_MOD=4, DOS_NOT_INHERIT=128};
@@ -299,4 +300,5 @@ void DOS_AddDevice(DOS_Device * adddev);
 void DOS_DelDevice(DOS_Device * dev);
 
 void VFILE_Register(const char * name,Bit8u * data,Bit32u size);
+void VFILE_RegisterBuiltinFileBlob(const struct BuiltinFileBlob &b);
 #endif

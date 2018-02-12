@@ -39,11 +39,17 @@ struct VFILE_Block {
 static VFILE_Block * first_file;	
 
 void VFILE_Shutdown(void) {
+	LOG(LOG_MISC,LOG_DEBUG)("Shutting down VFILE system");
+
 	while (first_file != NULL) {
 		VFILE_Block *n = first_file->next;
 		delete first_file;
 		first_file = n;
 	}
+}
+
+void VFILE_RegisterBuiltinFileBlob(const struct BuiltinFileBlob &b) {
+	VFILE_Register(b.recommended_file_name, (Bit8u*)b.data, b.length);
 }
 
 void VFILE_Register(const char * name,Bit8u * data,Bit32u size) {

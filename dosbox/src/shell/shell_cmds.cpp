@@ -31,6 +31,7 @@
 #include "../dos/drives.h"
 #include "support.h"
 #include "control.h"
+#include <algorithm>
 #include <cstring>
 #include <cctype>
 #include <cstdlib>
@@ -78,11 +79,12 @@ static SHELL_Cmd cmd_list[]={
 {	"PROMPT",	0,			&DOS_Shell::CMD_PROMPT,		"SHELL_CMD_PROMPT_HELP"},
 {	"LABEL",	0,			&DOS_Shell::CMD_LABEL,		"SHELL_CMD_LABEL_HELP"},
 #ifdef IPHONEOS
-    {       "UNZIP",        0,                      &DOS_Shell::CMD_UNZIP,          "SHELL_CMD_UNZIP_HELP"},
+{   "UNZIP",    0,          &DOS_Shell::CMD_UNZIP,      "SHELL_CMD_UNZIP_HELP"},
 #endif
-//{	"MORE",	1,			&DOS_Shell::CMD_MORE,		"SHELL_CMD_MORE_HELP"},
+{	"MORE",	1,			&DOS_Shell::CMD_MORE,		"SHELL_CMD_MORE_HELP"},
 {	"FOR",	1,			&DOS_Shell::CMD_FOR,		"SHELL_CMD_FOR_HELP"},
 {	"INT2FDBG",	1,			&DOS_Shell::CMD_INT2FDBG,	"Hook INT 2Fh for debugging purposes"},
+{	"CTTY",		1,			&DOS_Shell::CMD_CTTY,		"Change TTY device"},
 {0,0,0,0}
 }; 
 
@@ -246,10 +248,10 @@ static Bitu INT2FDBG_Handler(void) {
 			}
 
 			LOG_MSG(" >> Version %u.%u\n",v_major,v_minor);
-			LOG_MSG("    Next entry at %04x:%04x\n",st_seg_next,st_ofs_next);
-			LOG_MSG("    Virtual device name: %04x:%04x '%s'\n",name_seg,name_ofs,devname);
-			LOG_MSG("    Virtual dev ref data: %04x:%04x\n",vdev_seg,vdev_ofs);
-			LOG_MSG("    Instance data records: %04x:%04x\n",idrc_seg,idrc_ofs);
+			LOG_MSG("    Next entry at %04x:%04x\n",(int)st_seg_next,(int)st_ofs_next);
+			LOG_MSG("    Virtual device name: %04x:%04x '%s'\n",(int)name_seg,(int)name_ofs,devname);
+			LOG_MSG("    Virtual dev ref data: %04x:%04x\n",(int)vdev_seg,(int)vdev_ofs);
+			LOG_MSG("    Instance data records: %04x:%04x\n",(int)idrc_seg,(int)idrc_ofs);
 
 			st_seg = st_seg_next;
 			st_ofs = st_ofs_next;
@@ -327,7 +329,6 @@ void DOS_Shell::CMD_CLS(char * args) {
 void DOS_Shell::CMD_DELETE(char * args) {
 	HELP("DELETE");
 	bool optQ1=ScanCMDBool(args,"Q");
-	bool optP=ScanCMDBool(args,"P");
 
 	// ignore /p /f, /s, /ar, /as, /ah and /aa switches for compatibility
 	ScanCMDBool(args,"P");
@@ -613,7 +614,31 @@ static void FormatNumber(Bit32u num,char * buf) {
 		return;
 	};
 	sprintf(buf,"%d",numb);
-}	
+}
+
+struct DtaResult {
+	char name[DOS_NAMELENGTH_ASCII];
+	Bit32u size;
+	Bit16u date;
+	Bit16u time;
+	Bit8u attr;
+
+	static bool compareName(const DtaResult &lhs, const DtaResult &rhs) { return strcmp(lhs.name, rhs.name) < 0; }
+	static bool compareExt(const DtaResult &lhs, const DtaResult &rhs) { return strcmp(lhs.getExtension(), rhs.getExtension()) < 0; }
+	static bool compareSize(const DtaResult &lhs, const DtaResult &rhs) { return lhs.size < rhs.size; }
+	static bool compareDate(const DtaResult &lhs, const DtaResult &rhs) { return lhs.date < rhs.date || (lhs.date == rhs.date && lhs.time < rhs.time); }
+
+	const char * getExtension() const {
+		const char * ext = empty_string;
+		if (name[0] != '.') {
+			ext = strrchr(name, '.');
+			if (!ext) ext = empty_string;
+		}
+		return ext;
+	}
+
+};
+
 
 void DOS_Shell::CMD_DIR(char * args) {
 	HELP("DIR");
@@ -627,7 +652,7 @@ void DOS_Shell::CMD_DIR(char * args) {
 		line = std::string(args) + " " + value;
 		args=const_cast<char*>(line.c_str());
 	}
-   
+
 	bool optW=ScanCMDBool(args,"W");
 	ScanCMDBool(args,"S");
 	bool optP=ScanCMDBool(args,"P");
@@ -636,6 +661,29 @@ void DOS_Shell::CMD_DIR(char * args) {
 	}
 	bool optB=ScanCMDBool(args,"B");
 	bool optAD=ScanCMDBool(args,"AD");
+	bool optAminusD=ScanCMDBool(args,"A-D");
+	// Sorting flags
+	bool reverseSort = false;
+	bool optON=ScanCMDBool(args,"ON");
+	if (ScanCMDBool(args,"O-N")) {
+		optON = true;
+		reverseSort = true;
+	}
+	bool optOD=ScanCMDBool(args,"OD");
+	if (ScanCMDBool(args,"O-D")) {
+		optOD = true;
+		reverseSort = true;
+	}
+	bool optOE=ScanCMDBool(args,"OE");
+	if (ScanCMDBool(args,"O-E")) {
+		optOE = true;
+		reverseSort = true;
+	}
+	bool optOS=ScanCMDBool(args,"OS");
+	if (ScanCMDBool(args,"O-S")) {
+		optOS = true;
+		reverseSort = true;
+	}
 	char * rem=ScanCMDRemain(args);
 	if (rem) {
 		WriteOut(MSG_Get("SHELL_ILLEGAL_SWITCH"),rem);
@@ -716,13 +764,45 @@ void DOS_Shell::CMD_DIR(char * args) {
 		return;
 	}
 
-	do {    /* File name and extension */
-		char name[DOS_NAMELENGTH_ASCII];Bit32u size;Bit16u date;Bit16u time;Bit8u attr;
-		dta.GetResult(name,size,date,time,attr);
+	std::vector<DtaResult> results;
 
-		/* Skip non-directories if option AD is present */
-		if(optAD && !(attr&DOS_ATTR_DIRECTORY) ) continue;
-		
+	do {    /* File name and extension */
+		DtaResult result;
+		dta.GetResult(result.name,result.size,result.date,result.time,result.attr);
+
+		/* Skip non-directories if option AD is present, or skip dirs in case of A-D */
+		if(optAD && !(result.attr&DOS_ATTR_DIRECTORY) ) continue;
+		else if(optAminusD && (result.attr&DOS_ATTR_DIRECTORY) ) continue;
+
+		results.push_back(result);
+
+	} while ( (ret=DOS_FindNext()) );
+
+	if (optON) {
+		// Sort by name
+		std::sort(results.begin(), results.end(), DtaResult::compareName);
+	} else if (optOE) {
+		// Sort by extension
+		std::sort(results.begin(), results.end(), DtaResult::compareExt);
+	} else if (optOD) {
+		// Sort by date
+		std::sort(results.begin(), results.end(), DtaResult::compareDate);
+	} else if (optOS) {
+		// Sort by size
+		std::sort(results.begin(), results.end(), DtaResult::compareSize);
+	}
+	if (reverseSort) {
+		std::reverse(results.begin(), results.end());
+	}
+
+	for (std::vector<DtaResult>::iterator iter = results.begin(); iter != results.end(); iter++) {
+
+		char * name = iter->name;
+		Bit32u size = iter->size;
+		Bit16u date = iter->date;
+		Bit16u time = iter->time;
+		Bit8u attr = iter->attr;
+
 		/* output the file */
 		if (optB) {
 			// this overrides pretty much everything
@@ -770,7 +850,9 @@ void DOS_Shell::CMD_DIR(char * args) {
 		if (optP && !(++p_count%(22*w_size))) {
 			CMD_PAUSE(empty_string);
 		}
-	} while ( (ret=DOS_FindNext()) );
+	}
+
+
 	if (optW) {
 		if (w_count%5)	WriteOut("\n");
 	}
@@ -957,7 +1039,7 @@ void DOS_Shell::CMD_COPY(char * args) {
 		Bit16u sourceHandle,targetHandle;
 		char nameTarget[DOS_PATHLENGTH];
 		char nameSource[DOS_PATHLENGTH];
-
+		
 		// Cache so we don't have to recalculate
 		size_t pathTargetLen = strlen(pathTarget);
 		
@@ -1012,7 +1094,7 @@ void DOS_Shell::CMD_COPY(char * args) {
 				if (DOS_OpenFile(nameSource,0,&sourceHandle)) {
 					// Create Target or open it if in concat mode
 					strcpy(nameTarget,pathTarget);
-
+					
 					if (ext) { // substitute parts if necessary
 						if (!ext[-1]) { // substitute extension
 							strcat(nameTarget, name + replacementOffset);
@@ -1038,10 +1120,6 @@ void DOS_Shell::CMD_COPY(char * args) {
 								failed |= DOS_ReadFile(sourceHandle,buffer,&toread);
 								failed |= DOS_WriteFile(targetHandle,buffer,&toread);
 							} while (toread==0x8000);
-							if (!oldsource.concat) { // credits to FeedingDragon
-								DOS_GetFileDate(sourceHandle,&time,&date);
-								DOS_SetFileDate(targetHandle,time,date);
-							}
 							failed |= DOS_CloseFile(sourceHandle);
 							failed |= DOS_CloseFile(targetHandle);
 							WriteOut(" %s\n",name);
@@ -1229,7 +1307,7 @@ void DOS_Shell::CMD_SHIFT(char * args ) {
 
 void DOS_Shell::CMD_TYPE(char * args) {
 	HELP("TYPE");
-	bool optP=ScanCMDBool(args,"P");
+		
 	// ignore /p /h and /t for compatibility
 	ScanCMDBool(args,"P");
 	ScanCMDBool(args,"H");
@@ -1262,7 +1340,7 @@ void DOS_Shell::CMD_REM(char * args) {
 	HELP("REM");
 }
 
-/*static void PAUSED(void) {
+static void PAUSED(void) {
 	Bit8u c; Bit16u n=1;
 	DOS_ReadFile (STDIN,&c,&n);
 }
@@ -1271,9 +1349,9 @@ void DOS_Shell::CMD_MORE(char * args) {
 	HELP("MORE");
 	//ScanCMDBool(args,">");
 	if(!*args) {
-		//char defaultcon[DOS_PATHLENGTH+CROSS_LEN+20]={ 0 };
-		//strcpy(defaultcon,"copy con >nul");
-		//this->ParseLine(defaultcon);
+		char defaultcon[DOS_PATHLENGTH+CROSS_LEN+20]={ 0 };
+		strcpy(defaultcon,"copy con >nul");
+		this->ParseLine(defaultcon);
 		return;
 	}
 	int nchars = 0, nlines = 0, linecount = 0, LINES = (Bit16u)mem_readb(BIOS_ROWS_ON_SCREEN_MINUS_1)-3, COLS = mem_readw(BIOS_SCREEN_COLUMNS), TABSIZE = 8;
@@ -1320,7 +1398,7 @@ nextfile:
 		goto nextfile;
 	}
 }
-*/
+
 void DOS_Shell::CMD_PAUSE(char * args){
 	HELP("PAUSE");
 	if(args && *args) {
@@ -1711,7 +1789,6 @@ void DOS_Shell::CMD_UNZIP(char *args) {
     }
 }
 
-
 void DOS_Shell::CMD_GET(char *args) {
     if(args && *args) {
         char *end;
@@ -1789,28 +1866,7 @@ void DOS_Shell::CMD_VOL(char *args){
 	return;
 }
 
-extern bool dos_kernel_disabled;
-void SetVal(const std::string secname, std::string preval, const std::string val) {
-    if (dos_kernel_disabled)
-        return;
-    
-    if(preval=="keyboardlayout") {
-        DOS_MCB mcb(dos.psp()-1);
-        static char name[9];
-        mcb.GetFileName(name);
-        if (strlen(name)) {
-            LOG_MSG("GUI: Exit %s running in DOSBox, and then try again.",name);
-            return;
-        }
-    }
-    Section* sec = control->GetSection(secname);
-    if(sec) {
-        sec->ExecuteDestroy(false);
-        std::string real_val=preval+"="+val;
-        sec->HandleInputline(real_val);
-        sec->ExecuteInit(false);
-    }
-}
+void SetVal(const std::string secname, std::string preval, const std::string val);
 static void delayed_press(Bitu key) { KEYBOARD_AddKey((KBD_KEYS)key,true); }
 static void delayed_release(Bitu key) { KEYBOARD_AddKey((KBD_KEYS)key,false); }
 static void delayed_sdlpress(Bitu core) {
@@ -2015,7 +2071,30 @@ void DOS_Shell::CMD_ADDKEY(char * args){
 void DOS_Shell::CMD_FOR(char *args){
 }
 
+void DOS_Shell::CMD_CTTY(char * args) {
+	/* NTS: This is written to emulate the simplistic parsing in MS-DOS 6.22 */
+	Bit16u handle;
+	int i;
 
-// save state support
-void *delayed_press_PIC_Event = (void*)delayed_press;
-void *delayed_release_PIC_Event = (void*)delayed_release;
+	/* args has leading space? */
+	args = trim(args);
+
+	/* must be device */
+	if (DOS_FindDevice(args) == DOS_DEVICES) {
+		WriteOut("Invalid device");
+		return;
+	}
+
+	/* close STDIN/STDOUT/STDERR and replace with new handle */
+	if (!DOS_OpenFile(args,OPEN_READWRITE,&handle)) {
+		WriteOut("Unable to open device");
+		return;
+	}
+
+	for (i=0;i < 3;i++) {
+		DOS_CloseFile(i);
+		DOS_ForceDuplicateEntry(handle,i);
+	}
+	DOS_CloseFile(handle);
+}
+

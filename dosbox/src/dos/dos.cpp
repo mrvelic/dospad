@@ -21,21 +21,114 @@
 #include <string.h>
 #include <ctype.h>
 #include "dosbox.h"
+#include "dos_inc.h"
 #include "bios.h"
 #include "mem.h"
+#include "paging.h"
 #include "callback.h"
 #include "regs.h"
+#include "drives.h"
 #include "dos_inc.h"
 #include "setup.h"
 #include "support.h"
 #include "parport.h"
 #include "serialport.h"
 #include "dos_network.h"
-#include "../save_state.h"
 
+int ascii_toupper(int c) {
+    if (c >= 'a' && c <= 'z')
+        return c + 'A' - 'a';
+
+    return c;
+}
+
+bool shiftjis_lead_byte(int c) {
+    if ((((unsigned char)c & 0xE0) == 0x80) ||
+        (((unsigned char)c & 0xE0) == 0xE0))
+        return true;
+
+    return false;
+}
+
+char * shiftjis_upcase(char * str) {
+    for (char* idx = str; *idx ; ) {
+        if (shiftjis_lead_byte(*idx)) {
+            /* Shift-JIS is NOT ASCII and should not be converted to uppercase like ASCII.
+             * The trailing byte can be mistaken for ASCII */
+            idx++;
+            if (*idx != 0) idx++;
+        }
+        else {
+            *idx = ascii_toupper(*reinterpret_cast<unsigned char*>(idx));
+            idx++;
+        }
+    }
+
+    return str;
+}
+
+unsigned char cpm_compat_mode = CPM_COMPAT_MSDOS5;
+
+bool dos_in_hma = true;
 bool DOS_BreakFlag = false;
 bool enable_dbcs_tables = true;
 bool enable_filenamechar = true;
+bool enable_share_exe_fake = true;
+int dos_initial_hma_free = 34*1024;
+
+extern bool int15_wait_force_unmask_irq;
+
+Bit32u dos_hma_allocator = 0; /* physical memory addr */
+
+Bitu XMS_EnableA20(bool enable);
+Bitu XMS_GetEnabledA20(void);
+bool XMS_IS_ACTIVE();
+bool XMS_HMA_EXISTS();
+
+bool DOS_IS_IN_HMA() {
+	if (dos_in_hma && XMS_IS_ACTIVE() && XMS_HMA_EXISTS())
+		return true;
+
+	return false;
+}
+
+Bit32u DOS_HMA_LIMIT() {
+	if (dos.version.major < 5) return 0; /* MS-DOS 5.0+ only */
+	if (!DOS_IS_IN_HMA()) return 0;
+	return (0x110000 - 16); /* 1MB + 64KB - 16 bytes == (FFFF:FFFF + 1) == (0xFFFF0 + 0xFFFF + 1) == 0x10FFF0 */
+}
+
+Bit32u DOS_HMA_FREE_START() {
+	if (dos.version.major < 5) return 0; /* MS-DOS 5.0+ only */
+	if (!DOS_IS_IN_HMA()) return 0;
+
+	if (dos_hma_allocator == 0) {
+		dos_hma_allocator = 0x110000 - 16 - dos_initial_hma_free;
+		LOG(LOG_MISC,LOG_DEBUG)("Starting HMA allocation from physical address 0x%06x (FFFF:%04x)",
+			dos_hma_allocator,(dos_hma_allocator+0x10)&0xFFFF);
+	}
+
+	return dos_hma_allocator;
+}
+
+Bit32u DOS_HMA_GET_FREE_SPACE() {
+	Bit32u start;
+
+	if (dos.version.major < 5) return 0; /* MS-DOS 5.0+ only */
+	if (!DOS_IS_IN_HMA()) return 0;
+	start = DOS_HMA_FREE_START();
+	if (start == 0) return 0;
+	return (DOS_HMA_LIMIT() - start);
+}
+
+void DOS_HMA_CLAIMED(Bitu bytes) {
+	Bit32u limit = DOS_HMA_LIMIT();
+
+	if (limit == 0) E_Exit("HMA allocatiom bug: Claim function called when HMA allocation is not enabled");
+	if (dos_hma_allocator == 0) E_Exit("HMA allocatiom bug: Claim function called without having determined start");
+	dos_hma_allocator += bytes;
+	if (dos_hma_allocator > limit) E_Exit("HMA allocation bug: Exceeded limit");
+}
 
 Bit16u DOS_INFOBLOCK_SEG=0x80;	// sysvars (list of lists)
 Bit16u DOS_CONDRV_SEG=0xa0;
@@ -46,11 +139,20 @@ Bit16u DOS_CDS_SEG=0x108;
 Bit16u DOS_FIRST_SHELL=0x118;
 Bit16u DOS_FIRST_SHELL_END=0x158;
 Bit16u DOS_MEM_START=0x158;	 // regression to r3437 fixes nascar 2 colors
+Bit16u minimum_mcb_segment=0x70;
+Bit16u minimum_dos_initial_private_segment=0x70;
 
 Bit16u DOS_PRIVATE_SEGMENT=0;//0xc800;
 Bit16u DOS_PRIVATE_SEGMENT_END=0;//0xd000;
 
 Bitu DOS_PRIVATE_SEGMENT_Size=0x800;	// 32KB (0x800 pages), mainline DOSBox behavior
+
+bool enable_dummy_environment_block = true;
+bool enable_dummy_loadfix_padding = true;
+bool enable_dummy_device_mcb = true;
+
+extern unsigned int MAXENV;// = 32768u;
+extern unsigned int ENV_KEEPFREE;// = 83;
 
 DOS_Block dos;
 DOS_InfoBlock dos_infoblock;
@@ -166,6 +268,10 @@ static inline void overhead() {
 }
 #endif
 
+#define BCD2BIN(x)	((((x) >> 4) * 10) + ((x) & 0x0f))
+#define BIN2BCD(x)	((((x) / 10) << 4) + (x) % 10)
+extern bool date_host_forced;
+
 static Bitu DOS_21Handler(void);
 Bitu DEBUG_EnableDebugger(void);
 void CALLBACK_RunRealInt_retcsip(Bit8u intnum,Bitu &cs,Bitu &ip);
@@ -258,12 +364,47 @@ void DOS_BreakAction() {
 	DOS_BreakFlag = true;
 }
 
-#define BCD2BIN(x)	((((x) >> 4) * 10) + ((x) & 0x0f))
-#define BIN2BCD(x)	((((x) / 10) << 4) + (x) % 10)
-extern bool date_host_forced;
+/* unmask IRQ 0 automatically on disk I/O functions.
+ * there exist old DOS games and demos that rely on very selective IRQ masking,
+ * but, their code also assumes that calling into DOS or the BIOS will unmask the IRQ.
+ *
+ * This fixes "Rebel by Arkham" which masks IRQ 0-7 (PIC port 21h) in a VERY stingy manner!
+ *
+ *    Pseudocode (early in demo init):
+ *
+ *             in     al,21h
+ *             or     al,3Bh        ; mask IRQ 0, 1, 3, 4, and 5
+ *             out    21h,al
+ *
+ *    Later:
+ *
+ *             mov    ah,3Dh        ; open file
+ *             ...
+ *             int    21h
+ *             ...                  ; demo apparently assumes that INT 21h will unmask IRQ 0 when reading, because ....
+ *             in     al,21h
+ *             or     al,3Ah        ; mask IRQ 1, 3, 4, and 5
+ *             out    21h,al
+ *
+ * The demo runs fine anyway, but if we do not unmask IRQ 0 at the INT 21h call, the timer never ticks and the
+ * demo does not play any music (goldplay style, of course).
+ *
+ * This means several things. One is that a disk cache (which may provide the file without using INT 13h) could
+ * mysteriously prevent the demo from playing music. Future OS changes, where IRQ unmasking during INT 21h could
+ * not occur, would also prevent it from working. I don't know what the programmer was thinking, but side
+ * effects like that are not to be relied on!
+ *
+ * On the other hand, perhaps masking the keyboard (IRQ 1) was intended as an anti-debugger trick? You can't break
+ * into the demo if you can't trigger the debugger, after all! The demo can still poll the keyboard controller
+ * for ESC or whatever.
+ *
+ * --J.C. */
+bool disk_io_unmask_irq0 = true;
 
 #define DOSNAMEBUF 256
 static Bitu DOS_21Handler(void) {
+    bool unmask_irq0 = false;
+
 	if (((reg_ah != 0x50) && (reg_ah != 0x51) && (reg_ah != 0x62) && (reg_ah != 0x64)) && (reg_ah<0x6c)) {
 		DOS_PSP psp(dos.psp());
 		psp.SetStack(RealMake(SegValue(ss),reg_sp-18));
@@ -579,6 +720,10 @@ static Bitu DOS_21Handler(void) {
 		RealSetVec(reg_al,RealMakeSeg(ds,reg_dx));
 		break;
 	case 0x26:		/* Create new PSP */
+        /* TODO: DEBUG.EXE/DEBUG.COM as shipped with MS-DOS seems to reveal a bug where,
+         *       when DEBUG.EXE calls this function and you're NOT loading a program to debug,
+         *       the CP/M CALL FAR instruction's offset field will be off by 2. When does
+         *       that happen, and how do we emulate that? */
 		DOS_NewPSP(reg_dx,DOS_PSP(dos.psp()).GetSize());
 		reg_al=0xf0;	/* al destroyed */		
 		break;
@@ -767,7 +912,7 @@ static Bitu DOS_21Handler(void) {
 		break;
 	case 0x30:		/* Get DOS Version */
 		if (reg_al==0) reg_bh=0xFF;		/* Fake Microsoft DOS */
-		if (reg_al==1) reg_bh=0x10;		/* DOS is in HMA */
+		if (reg_al==1 && DOS_IS_IN_HMA()) reg_bh=0x10;		/* DOS is in HMA? */
 		reg_al=dos.version.major;
 		reg_ah=dos.version.minor;
 		/* Serialnumber */
@@ -811,7 +956,7 @@ static Bitu DOS_21Handler(void) {
 				reg_bl=dos.version.major;
 				reg_bh=dos.version.minor;
 				reg_dl=dos.version.revision;
-				reg_dh=0x10;								/* Dos in HMA */
+				reg_dh=DOS_IS_IN_HMA()?0x10:0x00;						/* Dos in HMA?? */
 				break;
 			case 7:
 				break;
@@ -909,6 +1054,7 @@ static Bitu DOS_21Handler(void) {
 		}
 		break;
 	case 0x3c:		/* CREATE Create of truncate file */
+        unmask_irq0 |= disk_io_unmask_irq0;
 		MEM_StrCopy(SegPhys(ds)+reg_dx,name1,DOSNAMEBUF);
 		if (DOS_CreateFile(name1,reg_cx,&reg_ax)) {
 			CALLBACK_SCF(false);
@@ -918,6 +1064,7 @@ static Bitu DOS_21Handler(void) {
 		}
 		break;
 	case 0x3d:		/* OPEN Open existing file */
+        unmask_irq0 |= disk_io_unmask_irq0;
 		MEM_StrCopy(SegPhys(ds)+reg_dx,name1,DOSNAMEBUF);
 		if (DOS_OpenFile(name1,reg_al,&reg_ax)) {
 			CALLBACK_SCF(false);
@@ -927,6 +1074,7 @@ static Bitu DOS_21Handler(void) {
 		}
 		break;
 	case 0x3e:		/* CLOSE Close file */
+        unmask_irq0 |= disk_io_unmask_irq0;
 		if (DOS_CloseFile(reg_bx)) {
 //			reg_al=0x01;	/* al destroyed. Refcount */
 			CALLBACK_SCF(false);
@@ -936,6 +1084,7 @@ static Bitu DOS_21Handler(void) {
 		}
 		break;
 	case 0x3f:		/* READ Read from file or device */
+        unmask_irq0 |= disk_io_unmask_irq0;
 		/* TODO: If handle is STDIN and not binary do CTRL+C checking */
 		{ 
 			Bit16u toread=reg_cx;
@@ -953,6 +1102,7 @@ static Bitu DOS_21Handler(void) {
 			break;
 		}
 	case 0x40:					/* WRITE Write to file or device */
+        unmask_irq0 |= disk_io_unmask_irq0;
 		{
 			Bit16u towrite=reg_cx;
 			MEM_BlockRead(SegPhys(ds)+reg_dx,dos_copybuf,towrite);
@@ -967,6 +1117,7 @@ static Bitu DOS_21Handler(void) {
 			break;
 		};
 	case 0x41:					/* UNLINK Delete file */
+        unmask_irq0 |= disk_io_unmask_irq0;
 		MEM_StrCopy(SegPhys(ds)+reg_dx,name1,DOSNAMEBUF);
 		if (DOS_UnlinkFile(name1)) {
 			CALLBACK_SCF(false);
@@ -976,6 +1127,7 @@ static Bitu DOS_21Handler(void) {
 		}
 		break;
 	case 0x42:					/* LSEEK Set current file position */
+        unmask_irq0 |= disk_io_unmask_irq0;
 		{
 			Bit32u pos=(reg_cx<<16) + reg_dx;
 			if (DOS_SeekFile(reg_bx,&pos,reg_al)) {
@@ -989,6 +1141,7 @@ static Bitu DOS_21Handler(void) {
 			break;
 		}
 	case 0x43:					/* Get/Set file attributes */
+        unmask_irq0 |= disk_io_unmask_irq0;
 		MEM_StrCopy(SegPhys(ds)+reg_dx,name1,DOSNAMEBUF);
 		switch (reg_al) {
 		case 0x00:				/* Get */
@@ -1093,7 +1246,7 @@ static Bitu DOS_21Handler(void) {
 	case 0x4b:					/* EXEC Load and/or execute program */
 		{ 
 			MEM_StrCopy(SegPhys(ds)+reg_dx,name1,DOSNAMEBUF);
-			LOG(LOG_EXEC,LOG_ERROR)("Execute %s %d",name1,reg_al);
+			LOG(LOG_EXEC,LOG_NORMAL)("Execute %s %d",name1,reg_al);
 			if (!DOS_Execute(name1,SegPhys(es)+reg_bx,reg_al)) {
 				reg_ax=dos.errorcode;
 				CALLBACK_SCF(true);
@@ -1254,8 +1407,8 @@ static Bitu DOS_21Handler(void) {
 			}
 			break;
 		}
-	case 0x5c:			/* FLOCK File region locking */
-		if (!control->cmdline->FindExist("-disable_share")) {	/* ert, 20100711: Locking extensions */
+	case 0x5c:	{		/* FLOCK File region locking */
+		/* ert, 20100711: Locking extensions */
 		Bit32u pos=(reg_cx<<16) + reg_dx;
 		Bit32u size=(reg_si<<16) + reg_di;
 		//LOG_MSG("LockFile: BX=%d, AL=%d, POS=%d, size=%d", reg_bx, reg_al, pos, size);
@@ -1266,13 +1419,13 @@ static Bitu DOS_21Handler(void) {
 			reg_ax=dos.errorcode;
 			CALLBACK_SCF(true);
 		}
-		break;
-		} else {
+		break; }
+		/*
 		DOS_SetError(DOSERR_FUNCTION_NUMBER_INVALID);
 		reg_ax = dos.errorcode;
 		CALLBACK_SCF(true);
 		break;
-		}
+		*/
 	case 0x5d:					/* Network Functions */
 		if(reg_al == 0x06) {
 			SegSet16(ds,DOS_SDA_SEG);
@@ -1505,6 +1658,17 @@ static Bitu DOS_21Handler(void) {
 		break;
 	};
 
+    /* if INT 21h involves any BIOS calls that need the timer, emulate the fact that tbe
+     * BIOS might unmask IRQ 0 as part of the job (especially INT 13h disk I/O).
+     *
+     * Some DOS games & demos mask interrupts at the PIC level in a stingy manner that
+     * apparently assumes DOS/BIOS will unmask some when called.
+     *
+     * Examples:
+     *   Rebel by Arkham (without this fix, timer interrupt will not fire during demo and therefore music will not play). */
+    if (unmask_irq0)
+        PIC_SetIRQMask(0,false); /* Enable system timer */
+
 	return CBRET_NONE;
 }
 
@@ -1526,6 +1690,23 @@ static Bitu DOS_20Handler(void) {
 	return CBRET_NONE;
 }
 
+static Bitu DOS_CPMHandler(void) {
+	// Convert a CPM-style call to a normal DOS call
+	Bit16u flags=CPU_Pop16();
+	CPU_Pop16();
+	Bit16u caller_seg=CPU_Pop16();
+	Bit16u caller_off=CPU_Pop16();
+	CPU_Push16(flags);
+	CPU_Push16(caller_seg);
+	CPU_Push16(caller_off);
+	if (reg_cl>0x24) {
+		reg_al=0;
+		return CBRET_NONE;
+	}
+	reg_ah=reg_cl;
+	return DOS_21Handler();
+}
+
 static Bitu DOS_27Handler(void) {
 	// Terminate & stay resident
 	Bit16u para = (reg_dx/16)+((reg_dx % 16)>0);
@@ -1535,6 +1716,19 @@ static Bitu DOS_27Handler(void) {
 		if (DOS_BreakINT23InProgress) throw int(0); /* HACK: Ick */
 	}
 	return CBRET_NONE;
+}
+
+extern DOS_Device *DOS_CON;
+
+static Bitu INT29_HANDLER(void) {
+    if (DOS_CON != NULL) {
+        unsigned char b = reg_al;
+        Bit16u sz = 1;
+
+        DOS_CON->Write(&b,&sz);
+    }
+
+    return CBRET_NONE;
 }
 
 static Bitu DOS_25Handler(void) {
@@ -1565,6 +1759,7 @@ static Bitu DOS_26Handler(void) {
 }
 
 extern bool mainline_compatible_mapping;
+bool iret_only_for_debug_interrupts = true;
 bool enable_collating_uppercase = true;
 bool keep_private_area_on_boot = false;
 bool dynamic_dos_kernel_alloc = false;
@@ -1572,30 +1767,163 @@ bool private_always_from_umb = false;
 bool private_segment_in_umb = true;
 Bit16u DOS_IHSEG = 0;
 
+// NOTE about 0x70 and PC-98 emulation mode:
+//
+// I don't know exactly how things differ in NEC's PC-98 MS-DOS, but,
+// according to some strange code in Touhou Project that's responsible
+// for blanking the text layer, there's a "row count" variable at 0x70:0x12
+// that holds (number of rows - 1). Leaving that byte value at zero prevents
+// the game from clearing the screen (which also exposes the tile data and
+// overdraw of the graphics layer). A value of zero instead just causes the
+// first text character row to be filled in, not the whole visible text layer.
+//
+// Pseudocode of the routine:
+//
+// XOR AX,AX
+// MOV ES,AX
+// MOV AL,ES:[0712h]            ; AX = BYTE [0x70:0x12] zero extend (ex. 0x18 == 24)
+// INC AX                       ; AX++                              (ex. becomes 0x19 == 25)
+// MOV DX,AX
+// SHL DX,1
+// SHL DX,1                     ; DX *= 4
+// ADD DX,AX                    ; DX += AX     equiv. DX = AX * 5
+// MOV CL,4h
+// SHL DX,CL                    ; DX <<= 4     equiv. DX = AX * 0x50  or  DX = AX * 80
+// ...
+// MOV AX,0A200h
+// MOV ES,AX
+// MOV AX,(solid black overlay block attribute)
+// MOV CX,DX
+// REP STOSW
+//
+// When the routine is done, the graphics layer is obscured by text character cells that
+// represent all black (filled in) so that the game can later "punch out" the regions
+// of the graphics layer it wants you to see. TH02 relies on this as well to flash the
+// screen and open from the center to show the title screen. During gameplay, the text
+// layer is used to obscure sprite overdraw when a sprite is partially off-screen as well
+// as hidden tile data on the right hand half of the screen that the game read/write
+// copies through the GDC pattern/tile registers to make the background. When the text
+// layer is not present it's immediately apparent that the sprite renderer makes no attempt
+// to clip sprites within the screen, but instead relies on the text overlay to hide the
+// overdraw.
+//
+// this means that on PC-98 one of two things are true. either:
+//  - NEC's variation of MS-DOS loads the base kernel higher up (perhaps at 0x80:0x00?)
+//    and the BIOS data area lies from 0x40:00 to 0x7F:00
+//
+//    or
+//
+//  - NEC's variation loads at 0x70:0x00 (same as IBM PC MS-DOS) and Touhou Project
+//    is dead guilty of reaching directly into MS-DOS kernel memory to read
+//    internal variables it shouldn't be reading directly!
+//
+// Ick...
+
 void DOS_GetMemory_reset();
 void DOS_GetMemory_Choose();
+Bitu MEM_PageMask(void);
 
 #include <assert.h>
 
 extern unsigned int dosbox_shell_env_size;
 extern bool dos_con_use_int16_to_detect_input;
 extern bool dbg_zero_on_dos_allocmem;
+extern bool log_dev_con;
 
 class DOS:public Module_base{
 private:
-	CALLBACK_HandlerObject callback[8];
+	CALLBACK_HandlerObject callback[9];
+	RealPt int30,int31;
+
 public:
+    void DOS_Write_HMA_CPM_jmp(void) {
+        // HMA mirror of CP/M entry point.
+        // this is needed for "F01D:FEF0" to be a valid jmp whether or not A20 is enabled
+        if (dos_in_hma &&
+            cpm_compat_mode != CPM_COMPAT_OFF &&
+            cpm_compat_mode != CPM_COMPAT_DIRECT) {
+            LOG(LOG_MISC,LOG_DEBUG)("Writing HMA mirror of CP/M entry point");
+
+            Bitu was_a20 = XMS_GetEnabledA20();
+
+            XMS_EnableA20(true);
+
+            mem_writeb(0x1000C0,(Bit8u)0xea);		// jmpf
+            mem_unalignedwrited(0x1000C0+1,callback[8].Get_RealPointer());
+
+            if (!was_a20) XMS_EnableA20(false);
+        }
+    }
+
+    Bitu DOS_Get_CPM_entry_direct(void) {
+        return callback[8].Get_RealPointer();
+    }
+
 	DOS(Section* configuration):Module_base(configuration){
 		Section_prop * section=static_cast<Section_prop *>(configuration);
 
+        dos_in_hma = section->Get_bool("dos in hma");
+        log_dev_con = control->opt_log_con || section->Get_bool("log console");
 		enable_dbcs_tables = section->Get_bool("dbcs");
+		enable_share_exe_fake = section->Get_bool("share");
 		enable_filenamechar = section->Get_bool("filenamechar");
+		dos_initial_hma_free = section->Get_int("hma free space");
+		minimum_mcb_segment = section->Get_hex("minimum mcb segment");
 		private_segment_in_umb = section->Get_bool("private area in umb");
 		enable_collating_uppercase = section->Get_bool("collating and uppercase");
 		dynamic_dos_kernel_alloc = section->Get_bool("dynamic kernel allocation");
 		private_always_from_umb = section->Get_bool("kernel allocation in umb");
+		minimum_dos_initial_private_segment = section->Get_hex("minimum dos initial private segment");
 		dos_con_use_int16_to_detect_input = section->Get_bool("con device use int 16h to detect keyboard input");
+		iret_only_for_debug_interrupts = section->Get_bool("write plain iretf for debug interrupts");
 		dbg_zero_on_dos_allocmem = section->Get_bool("zero memory on int 21h memory allocation");
+		MAXENV = section->Get_int("maximum environment block size on exec");
+		ENV_KEEPFREE = section->Get_int("additional environment block size on exec");
+		enable_dummy_environment_block = section->Get_bool("enable dummy environment block");
+		enable_dummy_loadfix_padding = section->Get_bool("enable loadfix padding");
+		enable_dummy_device_mcb = section->Get_bool("enable dummy device mcb");
+		int15_wait_force_unmask_irq = section->Get_bool("int15 wait force unmask irq");
+        disk_io_unmask_irq0 = section->Get_bool("unmask timer on disk io");
+
+        if (dos_initial_hma_free > 0x10000)
+            dos_initial_hma_free = 0x10000;
+
+        std::string cpmcompat = section->Get_string("cpm compatibility mode");
+
+        if (cpmcompat == "")
+            cpmcompat = "auto";
+
+        if (cpmcompat == "msdos2")
+            cpm_compat_mode = CPM_COMPAT_MSDOS2;
+        else if (cpmcompat == "msdos5")
+            cpm_compat_mode = CPM_COMPAT_MSDOS5;
+        else if (cpmcompat == "direct")
+            cpm_compat_mode = CPM_COMPAT_DIRECT;
+        else if (cpmcompat == "auto")
+            cpm_compat_mode = CPM_COMPAT_MSDOS5; /* MS-DOS 5.x is default */
+        else
+            cpm_compat_mode = CPM_COMPAT_OFF;
+
+        /* msdos 2.x and msdos 5.x modes, if HMA is involved, require us to take the first 256 bytes of HMA
+         * in order for "F01D:FEF0" to work properly whether or not A20 is enabled. Our direct mode doesn't
+         * jump through that address, and therefore doesn't need it. */
+        if (dos_in_hma &&
+            cpm_compat_mode != CPM_COMPAT_OFF &&
+            cpm_compat_mode != CPM_COMPAT_DIRECT) {
+            LOG(LOG_MISC,LOG_DEBUG)("DOS: CP/M compatibility method with DOS in HMA requires mirror of entry point in HMA.");
+            if (dos_initial_hma_free > 0xFF00) {
+                dos_initial_hma_free = 0xFF00;
+                LOG(LOG_MISC,LOG_DEBUG)("DOS: CP/M compatibility method requires reduction of HMA free space to accomodate.");
+            }
+        }
+
+		if ((int)MAXENV < 0) MAXENV = mainline_compatible_mapping ? 32768 : 65535;
+		if ((int)ENV_KEEPFREE < 0) ENV_KEEPFREE = mainline_compatible_mapping ? 83 : 1024;
+
+		LOG(LOG_MISC,LOG_DEBUG)("DOS: MAXENV=%u ENV_KEEPFREE=%u",MAXENV,ENV_KEEPFREE);
+
+		if (ENV_KEEPFREE < 83)
+			LOG_MSG("DOS: ENV_KEEPFREE is below 83 bytes. DOS programs that rely on undocumented data following the environment block may break.");
 
 		if (dbg_zero_on_dos_allocmem) {
 			LOG_MSG("Debug option enabled: INT 21h memory allocation will always clear memory block before returning\n");
@@ -1608,6 +1936,8 @@ public:
 
 		unsigned int DOS_FIRST_SHELL_SIZE;
 
+		if (minimum_mcb_segment > 0x8000) minimum_mcb_segment = 0x8000; /* FIXME: Clip against available memory */
+
 		if (dynamic_dos_kernel_alloc) {
 			if (dosbox_shell_env_size == 0)
 				dosbox_shell_env_size = (0x158 - (0x118 + 19)) << 4; /* equivalent to mainline DOSBox */
@@ -1618,13 +1948,38 @@ public:
 			if (mainline_compatible_mapping) {
 				DOS_IHSEG = 0x70;
 				DOS_PRIVATE_SEGMENT = 0x80;
+
+                if (IS_PC98_ARCH)
+                    LOG_MSG("WARNING: mainline compatible mapping is not recommended for PC-98 emulation");
 			}
 			else if (private_always_from_umb) {
 				DOS_GetMemory_Choose(); /* the pool starts in UMB */
-				DOS_MEM_START = 0x51; /* and we allow allocation from down below where the DOS kernel *would* reside */
+				if (minimum_mcb_segment == 0)
+					DOS_MEM_START = IS_PC98_ARCH ? 0x80 : 0x70; /* funny behavior in some games suggests the MS-DOS kernel loads a bit higher on PC-98 */
+				else
+					DOS_MEM_START = minimum_mcb_segment;
+
+				if (DOS_MEM_START < 0x40)
+					LOG_MSG("DANGER, DANGER! DOS_MEM_START has been set to within the interrupt vector table! Proceed at your own risk!");
+				else if (DOS_MEM_START < 0x50)
+					LOG_MSG("WARNING: DOS_MEM_START has been assigned to the BIOS data area! Proceed at your own risk!");
+				else if (DOS_MEM_START < 0x51)
+					LOG_MSG("WARNING: DOS_MEM_START has been assigned to segment 0x50, which some programs may use as the Print Screen flag");
+				else if (DOS_MEM_START < 0x80 && IS_PC98_ARCH)
+					LOG_MSG("CAUTION: DOS_MEM_START is less than 0x80 which may cause problems with some DOS games or applications relying on PC-98 BIOS state");
+				else if (DOS_MEM_START < 0x70)
+					LOG_MSG("CAUTION: DOS_MEM_START is less than 0x70 which may cause problems with some DOS games or applications");
 			}
 			else {
-				DOS_PRIVATE_SEGMENT = 0x50; /* NTS: The first paragraph overlaps the PRINT SCREEN BYTE but DOSBox's kernel does not use that byte anyway */
+				if (minimum_dos_initial_private_segment == 0)
+					DOS_PRIVATE_SEGMENT = IS_PC98_ARCH ? 0x80 : 0x70; /* funny behavior in some games suggests the MS-DOS kernel loads a bit higher on PC-98 */
+				else
+					DOS_PRIVATE_SEGMENT = minimum_dos_initial_private_segment;
+
+				if (DOS_PRIVATE_SEGMENT < 0x50)
+					LOG_MSG("DANGER, DANGER! DOS_PRIVATE_SEGMENT has been set too low!");
+				if (DOS_PRIVATE_SEGMENT < 0x80 && IS_PC98_ARCH)
+					LOG_MSG("DANGER, DANGER! DOS_PRIVATE_SEGMENT has been set too low for PC-98 emulation!");
 			}
 
 			if (!private_always_from_umb) {
@@ -1634,13 +1989,16 @@ public:
 					DOS_PRIVATE_SEGMENT_END = (MEM_TotalPages() << (12 - 4)) - 1; /* NTS: Remember DOSBox's implementation reuses the last paragraph for UMB linkage */
 			}
 
-			LOG_MSG("Dynamic DOS kernel mode, structures will be allocated from pool 0x%04x-0x%04x",
+			LOG(LOG_MISC,LOG_DEBUG)("Dynamic DOS kernel mode, structures will be allocated from pool 0x%04x-0x%04x",
 				DOS_PRIVATE_SEGMENT,DOS_PRIVATE_SEGMENT_END-1);
 
 			DOS_FIRST_SHELL_SIZE = 19 + (dosbox_shell_env_size >> 4);
 
 			if (!mainline_compatible_mapping) DOS_IHSEG = DOS_GetMemory(1,"DOS_IHSEG");
-			DOS_INFOBLOCK_SEG = DOS_GetMemory(0x20,"DOS_INFOBLOCK_SEG");	// was 0x80
+
+            /* DOS_INFOBLOCK_SEG contains the entire List of Lists, though the INT 21h call returns seg:offset with offset nonzero */
+			DOS_INFOBLOCK_SEG = DOS_GetMemory(0xC0,"DOS_INFOBLOCK_SEG");	// was 0x80
+
 			DOS_CONDRV_SEG = DOS_GetMemory(0x08,"DOS_CONDRV_SEG");		// was 0xA0
 			DOS_CONSTRING_SEG = DOS_GetMemory(0x0A,"DOS_CONSTRING_SEG");	// was 0xA8
 			DOS_SDA_SEG = DOS_GetMemory(0x56,"DOS_SDA_SEG");		// was 0xB2  (0xB2 + 0x56 = 0x108)
@@ -1666,7 +2024,7 @@ public:
 			DOS_FIRST_SHELL_END = DOS_MEM_START = 0x158;	 // regression to r3437 fixes nascar 2 colors
 
 			if (dosbox_shell_env_size != 0) {
-				LOG_MSG("WARNING: Shell environment block size setting is only available when dynamic dos kernel allocation is enabled\n");
+				LOG(LOG_MISC,LOG_WARN)("WARNING: Shell environment block size setting is only available when dynamic dos kernel allocation is enabled");
 				dosbox_shell_env_size = (DOS_FIRST_SHELL_END - (DOS_FIRST_SHELL+19)) << 4; /* see src/shell/shell.cpp line 722 for more information */
 			}
 
@@ -1686,22 +2044,22 @@ public:
 				DOS_PRIVATE_SEGMENT_END = segend;
 				DOS_MEM_START = DOS_PRIVATE_SEGMENT_END;
 				DOS_GetMemory_reset();
-				LOG_MSG("Private area, not stored in UMB on request, occupies 0x%04x-0x%04x",
+				LOG(LOG_MISC,LOG_DEBUG)("Private area, not stored in UMB on request, occupies 0x%04x-0x%04x",
 					DOS_PRIVATE_SEGMENT,DOS_PRIVATE_SEGMENT_END-1);
 			}
 		}
 
-		//LOG_MSG("DOS kernel alloc:\n");
-		//LOG_MSG("   IHSEG:        seg 0x%04x\n",DOS_IHSEG);
-		//LOG_MSG("   infoblock:    seg 0x%04x\n",DOS_INFOBLOCK_SEG);
-		//LOG_MSG("   condrv:       seg 0x%04x\n",DOS_CONDRV_SEG);
-		//LOG_MSG("   constring:    seg 0x%04x\n",DOS_CONSTRING_SEG);
-		//LOG_MSG("   SDA:          seg 0x%04x:0x%04x\n",DOS_SDA_SEG,DOS_SDA_OFS);
-		//LOG_MSG("   CDS:          seg 0x%04x\n",DOS_CDS_SEG);
-		//LOG_MSG("   first shell:  seg 0x%04x-0x%04x\n",DOS_FIRST_SHELL,DOS_FIRST_SHELL_END-1);
-		//LOG_MSG("[private segment @ this point 0x%04x-0x%04x mem=0x%04x]\n",
-		//	DOS_PRIVATE_SEGMENT,DOS_PRIVATE_SEGMENT_END,
-		//	MEM_TotalPages() << (12 - 4));
+		LOG(LOG_MISC,LOG_DEBUG)("DOS kernel alloc:");
+		LOG(LOG_MISC,LOG_DEBUG)("   IHSEG:        seg 0x%04x",DOS_IHSEG);
+		LOG(LOG_MISC,LOG_DEBUG)("   infoblock:    seg 0x%04x",DOS_INFOBLOCK_SEG);
+		LOG(LOG_MISC,LOG_DEBUG)("   condrv:       seg 0x%04x",DOS_CONDRV_SEG);
+		LOG(LOG_MISC,LOG_DEBUG)("   constring:    seg 0x%04x",DOS_CONSTRING_SEG);
+		LOG(LOG_MISC,LOG_DEBUG)("   SDA:          seg 0x%04x:0x%04x",DOS_SDA_SEG,DOS_SDA_OFS);
+		LOG(LOG_MISC,LOG_DEBUG)("   CDS:          seg 0x%04x",DOS_CDS_SEG);
+		LOG(LOG_MISC,LOG_DEBUG)("   first shell:  seg 0x%04x-0x%04x",DOS_FIRST_SHELL,DOS_FIRST_SHELL_END-1);
+		LOG(LOG_MISC,LOG_DEBUG)("[private segment @ this point 0x%04x-0x%04x mem=0x%04lx]",
+			DOS_PRIVATE_SEGMENT,DOS_PRIVATE_SEGMENT_END,
+			(unsigned long)(MEM_TotalPages() << (12 - 4)));
 
 		callback[0].Install(DOS_20Handler,CB_IRET,"DOS Int 20");
 		callback[0].Set_RealVec(0x20);
@@ -1726,18 +2084,50 @@ public:
 		callback[5].Install(NULL,CB_IRET/*CB_INT28*/,"DOS idle");
 		callback[5].Set_RealVec(0x28);
 
-		callback[6].Install(NULL,CB_INT29,"CON Output Int 29");
-		callback[6].Set_RealVec(0x29);
-		// pseudocode for CB_INT29:
-		//	push ax
-		//	mov ah, 0x0e
-		//	int 0x10
-		//	pop ax
-		//	iret
+        if (IS_PC98_ARCH) {
+            // PC-98 also has INT 29h but the behavior of some games suggest that it is handled
+            // the same as CON device output. Apparently the reason Touhou Project has been unable
+            // to clear the screen is that it uses INT 29h to directly send ANSI codes rather than
+            // standard I/O calls to write to the CON device.
+            callback[6].Install(INT29_HANDLER,CB_IRET,"CON Output Int 29");
+            callback[6].Set_RealVec(0x29);
+        }
+        else {
+            // FIXME: Really? Considering the main CON device emulation has ANSI.SYS emulation
+            //        you'd think that this would route it through the same.
+            callback[6].Install(NULL,CB_INT29,"CON Output Int 29");
+            callback[6].Set_RealVec(0x29);
+            // pseudocode for CB_INT29:
+            //	push ax
+            //	mov ah, 0x0e
+            //	int 0x10
+            //	pop ax
+            //	iret
+        }
 
-		/* DOS installs a handler for INT 1Bh */
-		callback[7].Install(BIOS_1BHandler,CB_IRET,"BIOS 1Bh");
-		callback[7].Set_RealVec(0x1B);
+        if (!IS_PC98_ARCH) {
+            /* DOS installs a handler for INT 1Bh */
+            callback[7].Install(BIOS_1BHandler,CB_IRET,"BIOS 1Bh");
+            callback[7].Set_RealVec(0x1B);
+        }
+
+		callback[8].Install(DOS_CPMHandler,CB_CPM,"DOS/CPM Int 30-31");
+		int30=RealGetVec(0x30);
+		int31=RealGetVec(0x31);
+		mem_writeb(0x30*4,(Bit8u)0xea);		// jmpf
+		mem_unalignedwrited(0x30*4+1,callback[8].Get_RealPointer());
+		// pseudocode for CB_CPM:
+		//	pushf
+		//	... the rest is like int 21
+
+        /* NTS: HMA support requires XMS. EMS support may switch on A20 if VCPI emulation requires the odd megabyte */
+        if ((!dos_in_hma || !section->Get_bool("xms")) && (MEM_A20_Enabled() || strcmp(section->Get_string("ems"),"false") != 0) &&
+            cpm_compat_mode != CPM_COMPAT_OFF && cpm_compat_mode != CPM_COMPAT_DIRECT) {
+            /* hold on, only if more than 1MB of RAM and memory access permits it */
+            if (MEM_TotalPages() > 0x100 && MEM_PageMask() > 0xff/*more than 20-bit decoding*/) {
+                LOG(LOG_MISC,LOG_WARN)("DOS not in HMA or XMS is disabled. This may break programs using the CP/M compatibility call method if the A20 gate is switched on.");
+            }
+        }
 
 		DOS_FILES = section->Get_int("files");
 		DOS_SetupFiles();								/* Setup system File tables */
@@ -1774,11 +2164,24 @@ public:
 				DOS_PRIVATE_SEGMENT_END = segend;
 				DOS_MEM_START = DOS_PRIVATE_SEGMENT_END;
 				DOS_GetMemory_reset();
-				LOG_MSG("Private area, not stored in UMB on request, occupies 0x%04x-0x%04x [dynamic]",
+				LOG_MSG("Private area, not stored in UMB on request, occupies 0x%04x-0x%04x [dynamic]\n",
 					DOS_PRIVATE_SEGMENT,DOS_PRIVATE_SEGMENT_END-1);
 			}
 		}
-		//LOG_MSG("   mem start:    seg 0x%04x\n",DOS_MEM_START);
+
+		if (minimum_mcb_segment != 0) {
+			if (DOS_MEM_START < minimum_mcb_segment)
+				DOS_MEM_START = minimum_mcb_segment;
+		}
+		/* a lot of DOS games and demos have problems with an MCB starting at, say, 0x70 or 0x170. So just simulate MS-DOS 7.0 luck
+		 * and emulate a DOS kernel that consumes 20-30KB of memory to keep things from crashing a lot. A user who wants to push
+		 * their luck freeing more conventional memory is free to set "minimum mcb segment" to a lower value. */
+		else if (dynamic_dos_kernel_alloc && !mainline_compatible_mapping) {
+			if (DOS_MEM_START < 0x800)
+				DOS_MEM_START = 0x800;
+		}
+
+		LOG(LOG_MISC,LOG_DEBUG)("   mem start:    seg 0x%04x",DOS_MEM_START);
 
 		/* carry on setup */
 		DOS_SetupMemory();								/* Setup first MCB */
@@ -1791,6 +2194,33 @@ public:
 	
 		dos.version.major=5;
 		dos.version.minor=0;
+
+		std::string ver = section->Get_string("ver");
+		if (!ver.empty()) {
+			const char *s = ver.c_str();
+
+			if (isdigit(*s)) {
+				dos.version.minor=0;
+				dos.version.major=(int)strtoul(s,(char**)(&s),10);
+				if (*s == '.') {
+					s++;
+					if (isdigit(*s)) {
+						dos.version.minor=(int)strtoul(s,(char**)(&s),10);
+					}
+				}
+
+				/* warn about unusual version numbers */
+				if (dos.version.major >= 10 && dos.version.major <= 30) {
+					LOG_MSG("WARNING, DOS version %u.%u: the major version is set to a "
+						"range that may cause some DOS programs to think they are "
+						"running from within an OS/2 DOS box.",
+						dos.version.major, dos.version.minor);
+				}
+				else if (dos.version.major == 0 || dos.version.major > 8 || dos.version.minor > 90)
+					LOG_MSG("WARNING: DOS version %u.%u is unusual, may confuse DOS programs",
+						dos.version.major, dos.version.minor);
+			}
+		}
 	}
 	~DOS(){
 		/* NTS: We do NOT free the drives! The OS may use them later! */
@@ -1798,10 +2228,22 @@ public:
 		DOS_ShutdownFiles();
 		void DOS_ShutdownDevices(void);
 		DOS_ShutdownDevices();
+		RealSetVec(0x30,int30);
+		RealSetVec(0x31,int31);
 	}
 };
 
 static DOS* test = NULL;
+
+void DOS_Write_HMA_CPM_jmp(void) {
+    assert(test != NULL);
+    test->DOS_Write_HMA_CPM_jmp();
+}
+
+Bitu DOS_Get_CPM_entry_direct(void) {
+    assert(test != NULL);
+    return test->DOS_Get_CPM_entry_direct();
+}
 
 void DOS_ShutdownFiles() {
 	if (Files != NULL) {
@@ -1823,161 +2265,52 @@ void DOS_ShutdownDrives() {
 	}
 }
 
+void DOS_UnsetupMemory();
+void DOS_Casemap_Free();
+
 void DOS_DoShutDown() {
 	if (test != NULL) {
 		delete test;
 		test = NULL;
 	}
+    DOS_UnsetupMemory();
+    DOS_Casemap_Free();
 }
 
 void DOS_ShutDown(Section* /*sec*/) {
 	DOS_DoShutDown();
 }
 
-void DOS_Init(Section* sec) {
-	test = new DOS(sec);
-	/* shutdown function */
-	sec->AddDestroyFunction(&DOS_ShutDown,false);
+void DOS_GetMemory_reinit();
+
+void DOS_OnReset(Section* /*sec*/) {
+	DOS_DoShutDown();
+    DOS_GetMemory_reinit();
 }
 
-
-extern void POD_Save_DOS_Devices( std::ostream& stream );
-extern void POD_Save_DOS_DriveManager( std::ostream& stream );
-extern void POD_Save_DOS_Files( std::ostream& stream );
-extern void POD_Save_DOS_Memory( std::ostream& stream );
-extern void POD_Save_DOS_Mscdex( std::ostream& stream );
-extern void POD_Save_DOS_Tables( std::ostream& stream );
-extern void POD_Load_DOS_Devices( std::istream& stream );
-extern void POD_Load_DOS_DriveManager( std::istream& stream );
-extern void POD_Load_DOS_Files( std::istream& stream );
-extern void POD_Load_DOS_Memory( std::istream& stream );
-extern void POD_Load_DOS_Mscdex( std::istream& stream );
-extern void POD_Load_DOS_Tables( std::istream& stream );
-
-//save state support
-namespace
-{
-class SerializeDos : public SerializeGlobalPOD
-{
-public:
-	SerializeDos() : SerializeGlobalPOD("Dos") 
-	{}
-
-private:
-	virtual void getBytes(std::ostream& stream)
-	{
-		SerializeGlobalPOD::getBytes(stream);
-
-		//***********************************************
-		//***********************************************
-		//***********************************************
-
-		// - pure data
-		WRITE_POD( &dos_copybuf, dos_copybuf );
-
-
-		WRITE_POD( &dos.firstMCB, dos.firstMCB );
-		WRITE_POD( &dos.errorcode, dos.errorcode );
-		WRITE_POD( &dos.env, dos.env );
-		WRITE_POD( &dos.cpmentry, dos.cpmentry );
-		WRITE_POD( &dos.return_code, dos.return_code );
-		WRITE_POD( &dos.return_mode, dos.return_mode );
-
-		WRITE_POD( &dos.current_drive, dos.current_drive );
-		WRITE_POD( &dos.verify, dos.verify );
-		WRITE_POD( &dos.breakcheck, dos.breakcheck );
-		WRITE_POD( &dos.echo, dos.echo );
-
-		WRITE_POD( &dos.loaded_codepage, dos.loaded_codepage );
-
-
-
-
-		POD_Save_DOS_Devices(stream);
-		POD_Save_DOS_DriveManager(stream);
-		POD_Save_DOS_Files(stream);
-		POD_Save_DOS_Memory(stream);
-		POD_Save_DOS_Mscdex(stream);
-		POD_Save_DOS_Tables(stream);
+void DOS_Startup(Section* sec) {
+	if (test == NULL) {
+        DOS_GetMemory_reinit();
+        LOG(LOG_MISC,LOG_DEBUG)("Allocating DOS kernel");
+		test = new DOS(control->GetSection("dos"));
 	}
-
-	virtual void setBytes(std::istream& stream)
-	{
-		SerializeGlobalPOD::setBytes(stream);
-
-		//***********************************************
-		//***********************************************
-		//***********************************************
-
-		// - pure data
-		READ_POD( &dos_copybuf, dos_copybuf );
-
-
-		READ_POD( &dos.firstMCB, dos.firstMCB );
-		READ_POD( &dos.errorcode, dos.errorcode );
-		READ_POD( &dos.env, dos.env );
-		READ_POD( &dos.cpmentry, dos.cpmentry );
-		READ_POD( &dos.return_code, dos.return_code );
-		READ_POD( &dos.return_mode, dos.return_mode );
-
-		READ_POD( &dos.current_drive, dos.current_drive );
-		READ_POD( &dos.verify, dos.verify );
-		READ_POD( &dos.breakcheck, dos.breakcheck );
-		READ_POD( &dos.echo, dos.echo );
-	
-		READ_POD( &dos.loaded_codepage, dos.loaded_codepage );
-
-
-
-
-		POD_Load_DOS_Devices(stream);
-		POD_Load_DOS_DriveManager(stream);
-		POD_Load_DOS_Files(stream);
-		POD_Load_DOS_Memory(stream);
-		POD_Load_DOS_Mscdex(stream);
-		POD_Load_DOS_Tables(stream);
-	}
-} dummy;
 }
 
+void DOS_Init() {
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing DOS kernel (DOS_Init)");
+    LOG(LOG_MISC,LOG_DEBUG)("sizeof(union bootSector) = %u",(unsigned int)sizeof(union bootSector));
+    LOG(LOG_MISC,LOG_DEBUG)("sizeof(struct bootstrap) = %u",(unsigned int)sizeof(struct bootstrap));
+    LOG(LOG_MISC,LOG_DEBUG)("sizeof(direntry) = %u",(unsigned int)sizeof(direntry));
 
+    /* this code makes assumptions! */
+    assert(sizeof(direntry) == 32);
+    assert((SECTOR_SIZE_MAX % sizeof(direntry)) == 0);
+    assert((MAX_DIRENTS_PER_SECTOR * sizeof(direntry)) == SECTOR_SIZE_MAX);
 
-/*
-ykhwong svn-daum 2012-05-21
+	AddExitFunction(AddExitFunctionFuncPair(DOS_ShutDown),false);
+	AddVMEventFunction(VM_EVENT_RESET,AddVMEventFunctionFuncPair(DOS_OnReset));
+	AddVMEventFunction(VM_EVENT_DOS_EXIT_KERNEL,AddVMEventFunctionFuncPair(DOS_ShutDown));
+	AddVMEventFunction(VM_EVENT_DOS_EXIT_REBOOT_KERNEL,AddVMEventFunctionFuncPair(DOS_ShutDown));
+	AddVMEventFunction(VM_EVENT_DOS_SURPRISE_REBOOT,AddVMEventFunctionFuncPair(DOS_OnReset));
+}
 
-
-Bit8u dos_copybuf[DOS_COPYBUFSIZE];
-
-struct DOS_Block
-	// - system data
-	DOS_Date date;
-	bool hostdate;
-	DOS_Version version;
-
-	// - pure data
-	Bit16u firstMCB;
-	Bit16u errorcode;
-	Bit16u env;
-	RealPt cpmentry;
-	Bit8u return_code,return_mode;
-	
-	Bit8u current_drive;
-	bool verify;
-	bool breakcheck;
-	bool echo;          // if set to true dev_con::read will echo input 
-
-	// - system data
-	struct  {
-		RealPt mediaid;
-		RealPt tempdta;
-		RealPt tempdta_fcbdelete;
-		RealPt dbcs;
-		RealPt filenamechar;
-		RealPt collatingseq;
-		RealPt upcase;
-		Bit8u* country;//Will be copied to dos memory. resides in real mem
-		Bit16u dpb; //Fake Disk parameter system using only the first entry so the drive letter matches
-	} tables;
-
-	Bit16u loaded_codepage;
-*/

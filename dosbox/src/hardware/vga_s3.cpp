@@ -22,7 +22,6 @@
 #include "vga.h"
 #include "mem.h"
 #include "pci_bus.h"
-#include "../save_state.h"
 
 void SVGA_S3_WriteCRTC(Bitu reg,Bitu val,Bitu iolen) {
 	switch (reg) {
@@ -246,6 +245,7 @@ void SVGA_S3_WriteCRTC(Bitu reg,Bitu val,Bitu iolen) {
 		*/
 	case 0x58:	/* Linear Address Window Control */
 		vga.s3.reg_58=val;
+		VGA_StartUpdateLFB();
 		break;
 		/*
 			0-1	Linear Address Window Size. Must be less than or equal to video
@@ -360,7 +360,7 @@ void SVGA_S3_WriteCRTC(Bitu reg,Bitu val,Bitu iolen) {
 		vga.s3.reg_6b=(Bit8u)val;
 		break;
 	default:
-		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:S3:CRTC:Write to illegal index %2X", reg );
+		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:S3:CRTC:Write to illegal index %2X", (int)reg );
 		break;
 	}
 }
@@ -479,7 +479,7 @@ void SVGA_S3_WriteSEQ(Bitu reg,Bitu val,Bitu iolen) {
 		VGA_StartResize();
 		break;
 	default:
-		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:S3:SEQ:Write to illegal index %2X", reg );
+		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:S3:SEQ:Write to illegal index %2X", (int)reg );
 		break;
 	}
 }
@@ -514,7 +514,7 @@ Bitu SVGA_S3_ReadSEQ(Bitu reg,Bitu iolen) {
 			return retval;
 		}
 	default:
-		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:S3:SEQ:Read from illegal index %2X", reg);
+		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:S3:SEQ:Read from illegal index %2X", (int)reg);
 		return 0;
 	}
 }
@@ -585,107 +585,3 @@ void SVGA_Setup_S3Trio(void) {
 	PCI_AddSVGAS3_Device();
 }
 
-
-
-// save state support
-
-void POD_Save_VGA_S3( std::ostream& stream )
-{
-	// - pure struct data
-	WRITE_POD( &vga.s3, vga.s3 );
-
-	//*****************************************
-	//*****************************************
-
-	// static globals
-
-	WRITE_POD( &reg17index, reg17index );
-}
-
-
-void POD_Load_VGA_S3( std::istream& stream )
-{
-	// - pure struct data
-	READ_POD( &vga.s3, vga.s3 );
-
-	//*****************************************
-	//*****************************************
-
-	// static globals
-
-	READ_POD( &reg17index, reg17index );
-}
-
-
-/*
-ykhwong svn-daum 2012-02-20
-
-static globals:
-
-// - pure data
-Bit8u reg17index;
-
-
-
-struct VGA_S3:
-
-typedef struct {
-
-// - pure data
-	Bit8u reg_lock1;
-	Bit8u reg_lock2;
-	Bit8u reg_31;
-	Bit8u reg_35;
-	Bit8u reg_36; // RAM size
-	Bit8u reg_3a; // 4/8/doublepixel bit in there
-	Bit8u reg_40; // 8415/A functionality register
-	Bit8u reg_41; // BIOS flags 
-	Bit8u reg_42; // CR42 Mode Control
-	Bit8u reg_43;
-	Bit8u reg_45; // Hardware graphics cursor
-	Bit8u reg_50;
-	Bit8u reg_51;
-	Bit8u reg_52;
-	Bit8u reg_55;
-	Bit8u reg_58;
-	Bit8u reg_6b; // LFB BIOS scratchpad
-	Bit8u ex_hor_overflow;
-	Bit8u ex_ver_overflow;
-	Bit16u la_window;
-	Bit8u misc_control_2;
-	Bit8u ext_mem_ctrl;
-	Bitu xga_screen_width;
-	VGAModes xga_color_mode;
-
-
-// - pure struct data
-	struct {
-		Bit8u r;
-		Bit8u n;
-		Bit8u m;
-	} clk[4],mclk;
-
-
-// - pure struct data
-	struct {
-		Bit8u lock;
-		Bit8u cmd;
-	} pll;
-
-
-	VGA_HWCURSOR hgc;
-
-
-
-struct VGA_HWCURSOR:
-
-// - pure data
-	Bit8u curmode;
-	Bit16u originx, originy;
-	Bit8u fstackpos, bstackpos;
-	Bit8u forestack[4];
-	Bit8u backstack[4];
-	Bit16u startaddr;
-	Bit8u posx, posy;
-	Bit8u mc[64][64];
-*/

@@ -48,6 +48,12 @@ extern Bit16u first_umb_size;
 bool MEM_unmap_physmem(Bitu start,Bitu end);
 bool MEM_map_RAM_physmem(Bitu start,Bitu end);
 
+struct BuiltinFileBlob {
+	const char		*recommended_file_name;
+	const unsigned char	*data;
+	size_t			length;
+};
+
 struct DOS_Date {
 	Bit16u year;
 	Bit8u month;
@@ -80,6 +86,8 @@ typedef unsigned int        UINT32, *PUINT32;
 }
 #endif
 
+#define SECTOR_SIZE_MAX     1024
+
 #ifdef _MSC_VER
 #pragma pack (1)
 #endif
@@ -90,9 +98,8 @@ union bootSector {
 		Bit16u bytesect;
 		Bit8u sectclust;
 		Bit16u reserve_sect;
-		Bit8u misc[496];
 	} bootdata;
-	Bit8u rawdata[512];
+	Bit8u rawdata[SECTOR_SIZE_MAX];
 } GCC_ATTRIBUTE(packed);
 #ifdef _MSC_VER
 #pragma pack ()
@@ -118,7 +125,8 @@ extern Bitu DOS_FILES;
 #define DOS_SDA_OFS 0
 #define DOS_CDS_SEG 0x108
 #define DOS_FIRST_SHELL 0x118
-#define DOS_MEM_START 0x16f		//First Segment that DOS can use
+#define DOS_MEM_START 0x158	 // regression to r3437 fixes nascar 2 colors
+//#define DOS_MEM_START 0x16f		//First Segment that DOS can use 
 
 #define DOS_PRIVATE_SEGMENT 0xc800
 #define DOS_PRIVATE_SEGMENT_END 0xd000
@@ -276,7 +284,7 @@ static INLINE Bit16u DOS_PackDate(Bit16u year,Bit16u mon,Bit16u day) {
 }
 
 /* fopen64, ftello64, fseeko64 */
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__MINGW32__)
  #define fopen64 fopen
  #define ftello64 ftell
  #define fseeko64 fseek
@@ -312,6 +320,7 @@ static INLINE Bit16u DOS_PackDate(Bit16u year,Bit16u mon,Bit16u day) {
 #define DOSERR_REMOVE_CURRENT_DIRECTORY 16
 #define DOSERR_NOT_SAME_DEVICE 17
 #define DOSERR_NO_MORE_FILES 18
+#define DOSERR_WRITE_PROTECTED 19
 #define DOSERR_FILE_ALREADY_EXISTS 80
 
 
@@ -487,7 +496,8 @@ public:
 		Bit8u	lastdrive;		//  0x21 lastdrive
 		Bit32u	nulNextDriver;	//  0x22 NUL driver next pointer
 		Bit16u	nulAttributes;	//  0x26 NUL driver aattributes
-		Bit32u	nulStrategy;	//  0x28 NUL driver strategy routine
+        Bit16u  nulStrategy;    //  0x28 NUL driver strategy routine
+        Bit16u  nulInterrupt;   //  0x2A NUL driver interrupt routine
 		Bit8u	nulString[8];	//  0x2c NUL driver name string
 		Bit8u	joindedDrives;		//  0x34 joined drives
 		Bit16u	specialCodeSeg;		//  0x35 special code segment

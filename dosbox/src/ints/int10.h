@@ -19,7 +19,8 @@
 
 #include "vga.h"
 
-#define S3_LFB_BASE		0xC0000000
+/* TODO: Make this user-configurable */
+#define S3_LFB_BASE		0xE0000000
 
 #define BIOSMEM_SEG		0x40
 
@@ -175,7 +176,7 @@ void INT10_SetCursorPos(Bit8u row,Bit8u col,Bit8u page);
 void INT10_TeletypeOutput(Bit8u chr,Bit8u attr);
 void INT10_TeletypeOutputAttr(Bit8u chr,Bit8u attr,bool useattr);
 void INT10_ReadCharAttr(Bit16u * result,Bit8u page);
-void INT10_WriteChar(Bit8u chr,Bit8u attr,Bit8u page,Bit16u count,bool showattr);
+void INT10_WriteChar(Bit16u chr,Bit8u attr,Bit8u page,Bit16u count,bool showattr);
 void INT10_WriteString(Bit8u row,Bit8u col,Bit8u flag,Bit8u attr,PhysPt string,Bit16u count,Bit8u page);
 
 /* Graphics Stuff */

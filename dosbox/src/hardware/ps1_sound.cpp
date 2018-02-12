@@ -26,7 +26,7 @@
 #include "pic.h"
 #include "dma.h"
 #include "sn76496.h"
-#include "../save_state.h"
+#include "control.h"
 
 extern bool PS1AudioCard;
 #define DAC_CLOCK 1000000
@@ -148,7 +148,7 @@ static void PS1SOUNDWrite(Bitu port,Bitu data,Bitu iolen) {
 
 #if C_DEBUG != 0
 	if( ( port != 0x0205 ) && ( port != 0x0200 ) )
-		LOG_MSG("PS1 WR %04X,%02X (%04X:%08X)",port,data,SegValue(cs),reg_eip);
+		LOG_MSG("PS1 WR %04X,%02X (%04X:%08X)",(int)port,(int)data,(int)SegValue(cs),(int)reg_eip);
 #endif
 	switch(port)
 	{
@@ -223,7 +223,7 @@ static Bitu PS1SOUNDRead(Bitu port,Bitu iolen) {
 		ps1.enabledDAC=true;
 	}
 #if C_DEBUG != 0
-	LOG_MSG("PS1 RD %04X (%04X:%08X)",port,SegValue(cs),reg_eip);
+	LOG_MSG("PS1 RD %04X (%04X:%08X)",(int)port,(int)SegValue(cs),(int)reg_eip);
 #endif
 	switch(port)
 	{
@@ -348,6 +348,7 @@ public:
 			(strcmp(section->Get_string("ps1audio"),"auto")!=0)) return;
 
 		PS1AudioCard=true;
+		LOG(LOG_MISC,LOG_DEBUG)("PS/1 sound emulation enabled");
 
 		// Ports 0x0200-0x0205 (let normal code handle the joystick at 0x0201).
 		ReadHandler[0].Install(0x200,&PS1SOUNDRead,IO_MB);
@@ -367,145 +368,53 @@ public:
 		ps1.last_writeSN = 0;
 		PS1DAC_Reset(true);
 
+// > Jmk wrote:
+// > Judging by what I've read in that technical document, it looks like the sound chip is fed by a 4 Mhz clock instead of a ~3.5 Mhz clock.
+// > 
+// > So, there's a line in ps1_sound.cpp that looks like this:
+// > SN76496Reset( &ps1.sn, 3579545, sample_rate );
+// > 
+// > Instead, it should look like this:
+// > SN76496Reset( &ps1.sn, 4000000, sample_rate );
+// > 
+// > That should fix it! Mind you, that was with the old code (it was 0.72 I worked with) which may have been updated since, but the same principle applies.
+//
+// NTS: I do not have anything to test this change! --J.C.
+//		SN76496Reset( &ps1.sn, 3579545, sample_rate );
 		SN76496Reset( &ps1.sn, 4000000, sample_rate );
 	}
 	~PS1SOUND(){ }
 };
 
-static PS1SOUND* test;
+static PS1SOUND* test = NULL;
 
 void PS1SOUND_ShutDown(Section* sec) {
-	delete test;	
+    if (test) {
+        delete test;
+        test = NULL;
+    }
 }
 
-void PS1SOUND_Init(Section* sec) {
-	test = new PS1SOUND(sec);
-	sec->AddDestroyFunction(&PS1SOUND_ShutDown,true);
+void PS1SOUND_OnEnterPC98(Section* sec) {
+    if (test) {
+        delete test;
+        test = NULL;
+    }
 }
 
-
-
-// save state support
-void POD_Save_PS1_Sound( std::ostream& stream )
-{
-	const char pod_name[32] = "PS1";
-
-	if( stream.fail() ) return;
-	if( !test ) return;
-	if( !ps1.chanDAC ) return;
-
-
-	WRITE_POD( &pod_name, pod_name );
-
-	//*******************************************
-	//*******************************************
-	//*******************************************
-
-	// - near-pure struct data
-	WRITE_POD( &ps1, ps1 );
-
-	// *******************************************
-	// *******************************************
-
-	ps1.chanDAC->SaveState(stream);
-	ps1.chanSN->SaveState(stream);
-}
-
-
-void POD_Load_PS1_Sound( std::istream& stream )
-{
-	char pod_name[32] = {0};
-
-	if( stream.fail() ) return;
-	if( !test ) return;
-	if( !ps1.chanDAC ) return;
-
-
-	// error checking
-	READ_POD( &pod_name, pod_name );
-	if( strcmp( pod_name, "PS1" ) ) {
-		stream.clear( std::istream::failbit | std::istream::badbit );
-		return;
+void PS1SOUND_OnReset(Section* sec) {
+	if (test == NULL) {
+		LOG(LOG_MISC,LOG_DEBUG)("Allocating PS/1 sound emulation");
+		test = new PS1SOUND(control->GetSection("speaker"));
 	}
-
-	//************************************************
-	//************************************************
-	//************************************************
-
-	MixerChannel *chanDAC_old, *chanSN_old;
-
-
-	// save old ptrs
-	chanDAC_old = ps1.chanDAC;
-	chanSN_old = ps1.chanSN;
-
-	// *******************************************
-	// *******************************************
-
-	// - near-pure struct data
-	READ_POD( &ps1, ps1 );
-
-	// *******************************************
-	// *******************************************
-
-	// restore old ptrs
-	ps1.chanDAC = chanDAC_old;
-	ps1.chanSN = chanSN_old;
-
-
-	ps1.chanDAC->LoadState(stream);
-	ps1.chanSN->LoadState(stream);
 }
 
+void PS1SOUND_Init() {
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing PS/1 sound emulation");
 
-/*
-ykhwong svn-daum 2012-02-20
+	AddExitFunction(AddExitFunctionFuncPair(PS1SOUND_ShutDown),true);
+	AddVMEventFunction(VM_EVENT_RESET,AddVMEventFunctionFuncPair(PS1SOUND_OnReset));
 
+    AddVMEventFunction(VM_EVENT_ENTER_PC98_MODE,AddVMEventFunctionFuncPair(PS1SOUND_OnEnterPC98));
+}
 
-static globals:
-
-
-struct PS1AUDIO ps1
-
-	// - static 'new' ptr
-	MixerChannel * chanDAC;
-	MixerChannel * chanSN;
-
-	// - pure data
-	bool enabledDAC;
-	bool enabledSN;
-	Bitu last_writeDAC;
-	Bitu last_writeSN;
-	int SampleRate;
-
-	// - pure struct data
-	struct SN76496 sn;
-
-	// - pure data
-	Bit8u FIFO[FIFOSIZE];
-	Bit16u FIFO_RDIndex;
-	Bit16u FIFO_WRIndex;
-	bool Playing;
-	bool CanTriggerIRQ;
-	Bit32u Rate;
-	Bitu RDIndexHi;
-	Bitu Adder;
-	Bitu Pending;
-
-	// - pure data
-	Bit8u Status;
-	Bit8u Command;
-	Bit8u Data;
-	Bit8u Divisor;
-	Bit8u Unknown;
-
-
-
-// - static 'new' ptr
-static PS1SOUND* test;
-
-	// - static data
-	IO_ReadHandleObject ReadHandler[2];
-	IO_WriteHandleObject WriteHandler[2];
-	MixerObject MixerChanDAC, MixerChanSN;
-*/

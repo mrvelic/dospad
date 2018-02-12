@@ -121,7 +121,7 @@
 #if DBPP == 15
 #define PMAKE(_VAL) (PTYPE)(((_VAL&(31<<19))>>9)|((_VAL&(31<<11))>>6)|((_VAL&(31<<3))>>3))
 #elif DBPP == 16
-#define PMAKE(_VAL) (PTYPE)(((_VAL&(31<<19))>>8)|((_VAL&(63<<10))>>4)|((_VAL&(31<<3))>>3))
+#define PMAKE(_VAL) (PTYPE)(((_VAL&(31<<19))>>8)|((_VAL&(63<<10))>>5)|((_VAL&(31<<3))>>3))
 #elif DBPP == 32
 #define PMAKE(_VAL) (_VAL)
 #endif
@@ -154,6 +154,8 @@
 
 #if RENDER_USE_ADVANCED_SCALERS>1
 static void conc3d(Cache,SBPP,DBPP) (const void * s) {
+    (void)conc3d(Cache,SBPP,DBPP);
+
 #ifdef RENDER_NULL_INPUT
 	if (!s) {
 		render.scale.cacheRead += render.scale.cachePitch;

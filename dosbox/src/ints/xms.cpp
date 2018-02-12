@@ -29,7 +29,8 @@
 #include "inout.h"
 #include "xms.h"
 #include "bios.h"
-#include "../save_state.h"
+#include "cpu.h"
+#include "control.h"
 
 #include <algorithm>
 
@@ -63,6 +64,7 @@
 #define	XMS_FUNCTION_NOT_IMPLEMENTED		0x80
 #define	HIGH_MEMORY_NOT_EXIST				0x90
 #define	HIGH_MEMORY_IN_USE					0x91
+#define HIGH_MEMORY_NOT_BIG_ENOUGH			0x92
 #define	HIGH_MEMORY_NOT_ALLOCATED			0x93
 #define XMS_OUT_OF_SPACE					0xa0
 #define XMS_OUT_OF_HANDLES					0xa1
@@ -77,7 +79,14 @@
 #define	UMB_ONLY_SMALLER_BLOCK				0xb0
 #define	UMB_NO_BLOCKS_AVAILABLE				0xb1
 
+bool DOS_IS_IN_HMA();
+
 extern Bitu rombios_minimum_location;
+
+Bitu xms_hma_minimum_alloc = 0;
+bool xms_hma_exists = true;
+bool xms_hma_application_has_control = false;
+bool xms_hma_alloc_non_dos_kernel_control = true;
 
 struct XMS_Block {
 	Bitu	size;
@@ -109,15 +118,33 @@ struct XMS_MemMove{
 
 static int xms_local_enable_count = 0;
 
+void DOS_Write_HMA_CPM_jmp(void);
+
 Bitu XMS_EnableA20(bool enable) {
-	Bit8u val = IO_Read	(0x92);
-	if (enable) IO_Write(0x92,val | 2);
-	else		IO_Write(0x92,val & ~2);
-//	LOG_MSG("XMS A20 enable=%u lock=%u",enable?1:0,xms_local_enable_count);
+	Bit8u val;
+
+    if (IS_PC98_ARCH) {
+        // NEC PC-98: Unmask (enable) A20 by writing to port 0xF2.
+        //            Mask (disable) A20 by writing to port 0xF6.
+        val = IO_Read(0xF2);
+        if (enable) IO_Write(0xF2,val); // writing ANYTHING to 0xF2 will "cancel" the A20 mask
+        else        IO_Write(0xF6,val); // writing ANYTHING to 0xF6 will mask A20
+    }
+    else {
+        // IBM PC/AT: Port 0x92, bit 1, set if A20 enabled
+        val = IO_Read(0x92);
+        if (enable) IO_Write(0x92,val | 2);
+        else		IO_Write(0x92,val & ~2);
+    }
+
 	return 0;
 }
 
 Bitu XMS_GetEnabledA20(void) {
+    if (IS_PC98_ARCH) // NEC PC-98: Port 0xF2, bit 0, cleared if A20 enabled (set if A20 masked)
+	    return (IO_Read(0xF2)&1) == 0;
+
+    // IBM PC/AT: Port 0x92, bit 1, set if A20 enabled
 	return (IO_Read(0x92)&2)>0;
 }
 
@@ -170,7 +197,7 @@ Bitu XMS_AllocateMemory(Bitu size, Bit16u& handle) {	// size = kb
 		if (dbg_zero_on_xms_allocmem) XMS_ZeroAllocation(mem,pages);
 	} else {
 		mem=MEM_GetNextFreePage();
-		if (mem==0) LOG(LOG_MISC,LOG_ERROR)("XMS:Allocate zero pages with no memory left");
+		if (mem==0) LOG(LOG_MISC,LOG_DEBUG)("XMS:Allocate zero pages with no memory left"); // Windows 3.1 triggers this surprisingly often!
 		if (mem != 0 && dbg_zero_on_xms_allocmem) XMS_ZeroAllocation(mem,1);
 	}
 	xms_handles[index].free=false;
@@ -299,15 +326,49 @@ Bitu XMS_Handler(void) {
 	case XMS_GET_VERSION:										/* 00 */
 		reg_ax=XMS_VERSION;
 		reg_bx=XMS_DRIVER_VERSION;
-		reg_dx=0;	/* No we don't have HMA */
+		reg_dx=xms_hma_exists?1:0;
 		break;
 	case XMS_ALLOCATE_HIGH_MEMORY:								/* 01 */
-		reg_ax=0;
-		reg_bl=HIGH_MEMORY_NOT_EXIST;
+		if (xms_hma_exists) {
+			if (xms_hma_application_has_control || DOS_IS_IN_HMA()) {
+				/* hma already controlled by application or DOS kernel */
+				reg_ax=0;
+				reg_bl=HIGH_MEMORY_IN_USE;
+			}
+			else if (reg_dx < xms_hma_minimum_alloc) {
+				/* not big enough */
+				reg_ax=0;
+				reg_bl=HIGH_MEMORY_NOT_BIG_ENOUGH;
+			}
+			else { /* program allocation */
+				LOG(LOG_MISC,LOG_DEBUG)("XMS: HMA allocated by application/TSR");
+				xms_hma_application_has_control = true;
+				reg_ax=1;
+			}
+		}
+		else {
+			reg_ax=0;
+			reg_bl=HIGH_MEMORY_NOT_EXIST;
+		}
 		break;
 	case XMS_FREE_HIGH_MEMORY:									/* 02 */
-		reg_ax=0;
-		reg_bl=HIGH_MEMORY_NOT_EXIST;
+		if (xms_hma_exists) {
+			if (DOS_IS_IN_HMA()) LOG(LOG_MISC,LOG_WARN)("DOS application attempted to free HMA while DOS kernel occupies it!");
+
+			if (xms_hma_application_has_control) {
+				LOG(LOG_MISC,LOG_DEBUG)("XMS: HMA freed by application/TSR");
+				xms_hma_application_has_control = false;
+				reg_ax=1;
+			}
+			else {
+				reg_ax=0;
+				reg_bl=HIGH_MEMORY_NOT_ALLOCATED;
+			}
+		}
+		else {
+			reg_ax=0;
+			reg_bl=HIGH_MEMORY_NOT_EXIST;
+		}
 		break;
 	case XMS_GLOBAL_ENABLE_A20:									/* 03 */
 		SET_RESULT(XMS_EnableA20(true));
@@ -465,6 +526,8 @@ Bitu XMS_Handler(void) {
 	return CBRET_NONE;
 }
 
+bool xms_init = false;
+
 bool keep_umb_on_boot;
 
 extern Bitu VGA_BIOS_SEG;
@@ -472,6 +535,14 @@ extern Bitu VGA_BIOS_SEG_END;
 extern Bitu VGA_BIOS_Size;
 
 extern bool mainline_compatible_mapping;
+
+bool XMS_IS_ACTIVE() {
+	return (xms_callback != 0);
+}
+
+bool XMS_HMA_EXISTS() {
+	return XMS_IS_ACTIVE() && xms_hma_exists;
+}
 
 Bitu GetEMSType(Section_prop * section);
 void DOS_GetMemory_Choose();
@@ -496,7 +567,34 @@ public:
 	XMS(Section* configuration):Module_base(configuration){
 		Section_prop * section=static_cast<Section_prop *>(configuration);
 		umb_available=false;
+
 		if (!section->Get_bool("xms")) return;
+
+		/* NTS: Disable XMS emulation if CPU type is less than a 286, because extended memory did not
+		 *      exist until the CPU had enough address lines to read past the 1MB mark.
+		 *
+		 *      The other reason we do this is that there is plenty of software that assumes 286+ instructions
+		 *      if they detect XMS services, including but not limited to:
+		 *
+		 *      MSD.EXE Microsoft Diagnostics
+		 *      Microsoft Windows 3.0
+		 *
+		 *      Not emulating XMS for 8086/80186 emulation prevents the software from crashing. */
+
+		/* TODO: Add option to allow users to *force* XMS emulation, overriding this lockout, if they're
+		 *       crazy enough to see what happens or they want to witness the mis-detection mentioned above. */
+		if (CPU_ArchitectureType < CPU_ARCHTYPE_286) {
+			LOG_MSG("CPU is 80186 or lower model that lacks the address lines needed for 'extended memory' to exist, disabling XMS");
+			return;
+		}
+
+		xms_init = true;
+
+		xms_hma_exists = section->Get_bool("hma");
+		xms_hma_minimum_alloc = section->Get_int("hma minimum allocation");
+		xms_hma_alloc_non_dos_kernel_control = section->Get_bool("hma allow reservation");
+		if (xms_hma_minimum_alloc > 0xFFF0) xms_hma_minimum_alloc = 0xFFF0;
+
 		Bitu i;
 		BIOS_ZeroExtendedSize(true);
 		DOS_AddMultiplexHandler(multiplex_xms);
@@ -535,6 +633,9 @@ public:
 
 		DOS_GetMemory_Choose();
 
+		// Sanity check
+		if (rombios_minimum_location == 0) E_Exit("Uninitialized ROM BIOS base");
+
 		if (first_umb_seg == 0) {
 			first_umb_seg = DOS_PRIVATE_SEGMENT_END;
 			if (mainline_compatible_mapping && first_umb_seg < 0xD000)
@@ -545,48 +646,68 @@ public:
 		if (first_umb_size == 0) first_umb_size = ROMBIOS_MinAllocatedLoc()>>4;
 
 		if (first_umb_seg < 0xC000 || first_umb_seg < DOS_PRIVATE_SEGMENT_END) {
-			LOG_MSG("UMB warning: UMB blocks before 0xD000 conflict with VGA (0xA000-0xBFFF), VGA BIOS (0xC000-0xC7FF) and DOSBox private area (0x%04x-0x%04x)\n",
+			LOG(LOG_MISC,LOG_WARN)("UMB blocks before 0xD000 conflict with VGA (0xA000-0xBFFF), VGA BIOS (0xC000-0xC7FF) and DOSBox private area (0x%04x-0x%04x)",
 				DOS_PRIVATE_SEGMENT,DOS_PRIVATE_SEGMENT_END-1);
 			first_umb_seg = 0xC000;
 			if (first_umb_seg < (Bitu)DOS_PRIVATE_SEGMENT_END) first_umb_seg = (Bitu)DOS_PRIVATE_SEGMENT_END;
 		}
 		if (first_umb_seg >= (rombios_minimum_location>>4)) {
-			LOG_MSG("UMB starting segment 0x%04x conflict with BIOS at 0x%04x. Disabling UMBs\n",first_umb_seg,rombios_minimum_location>>4);
+			LOG(LOG_MISC,LOG_NORMAL)("UMB starting segment 0x%04x conflict with BIOS at 0x%04x. Disabling UMBs",(int)first_umb_seg,(int)(rombios_minimum_location>>4));
 			umb_available = false;
 		}
 		if (first_umb_size >= (rombios_minimum_location>>4)) {
 			/* we can ask the BIOS code to trim back the region, assuming it hasn't allocated anything there yet */
-			LOG_MSG("UMB ending segment 0x%04x conflicts with BIOS at 0x%04x, asking BIOS to move aside\n",first_umb_size,rombios_minimum_location>>4);
+			LOG(LOG_MISC,LOG_DEBUG)("UMB ending segment 0x%04x conflicts with BIOS at 0x%04x, asking BIOS to move aside",(int)first_umb_size,(int)(rombios_minimum_location>>4));
 			ROMBIOS_FreeUnusedMinToLoc(first_umb_size<<4);
 		}
 		if (first_umb_size >= (rombios_minimum_location>>4)) {
-			LOG_MSG("UMB ending segment 0x%04x conflicts with BIOS at 0x%04x, truncating region\n",first_umb_size,rombios_minimum_location>>4);
+			LOG(LOG_MISC,LOG_DEBUG)("UMB ending segment 0x%04x conflicts with BIOS at 0x%04x, truncating region",(int)first_umb_size,(int)(rombios_minimum_location>>4));
 			first_umb_size = (rombios_minimum_location>>4)-1;
 		}
+
+        Bitu GetEMSPageFrameSegment(void);
+
+        bool ems_available = GetEMSType(section)>0;
+
+        /* 2017/12/24 I just noticed that the EMS page frame will conflict with UMB on standard configuration.
+         * In IBM PC mode the EMS page frame is at E000:0000.
+         * In PC-98 mode the EMS page frame is at D000:0000. */
+        if (ems_available && first_umb_size >= GetEMSPageFrameSegment()) {
+            assert(GetEMSPageFrameSegment() >= 0xA000);
+            LOG(LOG_MISC,LOG_DEBUG)("UMB overlaps EMS page frame at 0x%04x, truncating region",(unsigned int)GetEMSPageFrameSegment());
+            first_umb_size = GetEMSPageFrameSegment() - 1;
+        }
+        /* UMB cannot interfere with EGC 4th graphics bitplane on PC-98 */
+        /* TODO: Allow UMB into E000:xxxx if emulating a PC-98 that lacks 16-color mode. */
+        if (IS_PC98_ARCH && first_umb_size >= 0xE000) {
+            LOG(LOG_MISC,LOG_DEBUG)("UMB overlaps PC-98 EGC 4th graphics bitplane, truncating region");
+            first_umb_size = 0xDFFF;
+        }
 		if (first_umb_size < first_umb_seg) {
-			LOG_MSG("UMB end segment below UMB start. I'll just assume you mean to disable UMBs then.\n");
+			LOG(LOG_MISC,LOG_NORMAL)("UMB end segment below UMB start. I'll just assume you mean to disable UMBs then.");
 			first_umb_size = first_umb_seg - 1;
 			umb_available = false;
 		}
 		first_umb_size = (first_umb_size + 1 - first_umb_seg);
 		if (umb_available) {
-			//LOG_MSG("UMB assigned region is 0x%04x-0x%04x\n",first_umb_seg,first_umb_seg+first_umb_size-1);
+			LOG(LOG_MISC,LOG_NORMAL)("UMB assigned region is 0x%04x-0x%04x",(int)first_umb_seg,(int)(first_umb_seg+first_umb_size-1));
 			if (MEM_map_RAM_physmem(first_umb_seg<<4,((first_umb_seg+first_umb_size)<<4)-1)) {
 				memset(GetMemBase()+(first_umb_seg<<4),0x00,first_umb_size<<4);
 			}
 			else {
-				LOG_MSG("Unable to claim UMB region (perhaps adapter ROM is in the way). Disabling UMB\n");
+				LOG(LOG_MISC,LOG_WARN)("Unable to claim UMB region (perhaps adapter ROM is in the way). Disabling UMB");
 				umb_available = false;
 			}
 		}
 
-		bool ems_available = GetEMSType(section)>0;
 		DOS_BuildUMBChain(umb_available,ems_available);
 		umb_init = true;
+
+        /* CP/M compat will break unless a copy of the JMP instruction is mirrored in HMA */
+        DOS_Write_HMA_CPM_jmp();
 	}
 
 	~XMS(){
-		Section_prop * section = static_cast<Section_prop *>(m_configuration);
 		/* Remove upper memory information */
 		dos_infoblock.SetStartOfUMBChain(0xffff);
 		if (umb_available) {
@@ -594,7 +715,8 @@ public:
 			umb_available=false;
 		}
 
-		if (!section->Get_bool("xms")) return;
+		if (!xms_init) return;
+
 		/* Undo biosclearing */
 		BIOS_ZeroExtendedSize(false);
 
@@ -604,9 +726,12 @@ public:
 		/* Free used memory while skipping the 0 handle */
 		for (Bitu i = 1;i<XMS_HANDLES;i++) 
 			if(!xms_handles[i].free) XMS_FreeMemory(i);
+
+		xms_init = false;
 	}
 
 };
+
 static XMS* test = NULL;
 
 void XMS_DoShutDown() {
@@ -620,22 +745,22 @@ void XMS_ShutDown(Section* /*sec*/) {
 	XMS_DoShutDown();
 }
 
-void XMS_Init(Section* sec) {
-	test = new XMS(sec);
-	sec->AddDestroyFunction(&XMS_ShutDown,true);
+bool XMS_Active(void) {
+    return (test != NULL) && xms_init;
 }
 
+void XMS_Startup(Section *sec) {
+	if (test == NULL) {
+		LOG(LOG_MISC,LOG_DEBUG)("Allocating XMS emulation");
+		test = new XMS(control->GetSection("dos"));
+	}
+}
 
-//save state support
-		namespace
-{
-class SerializeXMS : public SerializeGlobalPOD
-{
-public:
-    SerializeXMS() : SerializeGlobalPOD("XMS")
-    {
-        registerPOD(xms_handles);
-    }
-} dummy;
+void XMS_Init() {
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing XMS extended memory services");
+
+	AddExitFunction(AddExitFunctionFuncPair(XMS_ShutDown),true);
+	AddVMEventFunction(VM_EVENT_RESET,AddVMEventFunctionFuncPair(XMS_ShutDown));
+	AddVMEventFunction(VM_EVENT_DOS_EXIT_BEGIN,AddVMEventFunctionFuncPair(XMS_ShutDown));
 }
 

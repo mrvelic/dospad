@@ -25,7 +25,6 @@
 #include <stdio.h>
 #include "callback.h"
 #include "cpu.h"		// for 0x3da delay
-#include "../save_state.h"
 
 #define XGA_SCREEN_WIDTH	vga.s3.xga_screen_width
 #define XGA_COLOR_MODE		vga.s3.xga_color_mode
@@ -105,7 +104,7 @@ void XGA_Write_Multifunc(Bitu val, Bitu len) {
 			xga.read_sel = dataval;
 			break;
 		default:
-			LOG_MSG("XGA: Unhandled multifunction command %x", regselect);
+			LOG_MSG("XGA: Unhandled multifunction command %x", (int)regselect);
 			break;
 	}
 }
@@ -310,23 +309,26 @@ void XGA_DrawLineVector(Bitu val) {
 					case 0x02: /* Src is pixel data from PIX_TRANS register */
 						//srcval = tmpval;
 						//LOG_MSG("XGA: DrawRect: Wants data from PIX_TRANS register");
+						srcval = 0;
 						break;
 					case 0x03: /* Src is bitmap data */
 						LOG_MSG("XGA: DrawRect: Wants data from srcdata");
 						//srcval = srcdata;
+						srcval = 0;
 						break;
 					default:
 						LOG_MSG("XGA: DrawRect: Shouldn't be able to get here!");
+						srcval = 0;
 						break;
 				}
 				dstdata = XGA_GetPoint(xat,yat);
 
 				destval = XGA_GetMixResult(mixmode, srcval, dstdata);
 
-                XGA_DrawPoint(xat,yat, destval);
+				XGA_DrawPoint(xat,yat, destval);
 				break;
 			default: 
-				LOG_MSG("XGA: DrawLine: Needs mixmode %x", mixmode);
+				LOG_MSG("XGA: DrawLine: Needs mixmode %x", (int)mixmode);
 				break;
 		}
 		xat += sx;
@@ -348,19 +350,19 @@ void XGA_DrawLineBresenham(Bitu val) {
 
 #define SWAP(a,b) tmpswap = a; a = b; b = tmpswap;
 
-	Bit32s dx, sx, dy, sy, e, dmajor, dminor,destxtmp;
+	Bits dx, sx, dy, sy, e, dmajor, dminor,destxtmp;
 
 	// Probably a lot easier way to do this, but this works.
 
 	dminor = (Bits)((Bit16s)xga.desty);
-	if(xga.desty&0x2000) dminor |= 0xffffe000;
+	if(xga.desty&0x2000) dminor |= ~((Bits)0x1fff);
 	dminor >>= 1;
 
 	destxtmp=(Bits)((Bit16s)xga.destx);
-	if(xga.destx&0x2000) destxtmp |= 0xffffe000;
+	if(xga.destx&0x2000) destxtmp |= ~((Bits)0x1fff);
 
 
-	dmajor = -(destxtmp - (dminor << 1)) >> 1;
+	dmajor = -(destxtmp - (dminor << (Bits)1)) >> (Bits)1;
 	
 	dx = dmajor;
 	if((val >> 5) & 0x1) {
@@ -375,7 +377,7 @@ void XGA_DrawLineBresenham(Bitu val) {
 		sy = -1;
 	}
 	e = (Bits)((Bit16s)xga.ErrTerm);
-	if(xga.ErrTerm&0x2000) e |= 0xffffe000;
+	if(xga.ErrTerm&0x2000) e |= ~((Bits)0x1fff); /* sign extend 13-bit error term */
 	xat = xga.curx;
 	yat = xga.cury;
 
@@ -387,7 +389,8 @@ void XGA_DrawLineBresenham(Bitu val) {
 		steep = true;
 	}
     
-	//LOG_MSG("XGA: Bresenham: ASC %d, LPDSC %d, sx %d, sy %d, err %d, steep %d, length %d, dmajor %d, dminor %d, xstart %d, ystart %d", dx, dy, sx, sy, e, steep, xga.MAPcount, dmajor, dminor,xat,yat);
+//	LOG_MSG("XGA: Bresenham: ASC %ld, LPDSC %ld, sx %ld, sy %ld, err %ld, steep %ld, length %ld, dmajor %ld, dminor %ld, xstart %ld, ystart %ld",
+//		dx, dy, sx, sy, e, (unsigned long)steep, (unsigned long)xga.MAPcount, dmajor, dminor, xat, yat);
 
 	for (i=0;i<=xga.MAPcount;i++) { 
 			Bitu mixmode = (xga.pix_cntl >> 6) & 0x3;
@@ -404,13 +407,16 @@ void XGA_DrawLineBresenham(Bitu val) {
 						case 0x02: /* Src is pixel data from PIX_TRANS register */
 							//srcval = tmpval;
 							LOG_MSG("XGA: DrawRect: Wants data from PIX_TRANS register");
+							srcval = 0;
 							break;
 						case 0x03: /* Src is bitmap data */
 							LOG_MSG("XGA: DrawRect: Wants data from srcdata");
 							//srcval = srcdata;
+							srcval = 0;
 							break;
 						default:
 							LOG_MSG("XGA: DrawRect: Shouldn't be able to get here!");
+							srcval = 0;
 							break;
 					}
 
@@ -430,7 +436,7 @@ void XGA_DrawLineBresenham(Bitu val) {
 
 					break;
 				default: 
-					LOG_MSG("XGA: DrawLine: Needs mixmode %x", mixmode);
+					LOG_MSG("XGA: DrawLine: Needs mixmode %x", (int)mixmode);
 					break;
 			}
 			while (e > 0) {
@@ -486,23 +492,26 @@ void XGA_DrawRectangle(Bitu val) {
 						case 0x02: /* Src is pixel data from PIX_TRANS register */
 							//srcval = tmpval;
 							LOG_MSG("XGA: DrawRect: Wants data from PIX_TRANS register");
+							srcval = 0;
 							break;
 						case 0x03: /* Src is bitmap data */
 							LOG_MSG("XGA: DrawRect: Wants data from srcdata");
 							//srcval = srcdata;
+							srcval = 0;
 							break;
 						default:
 							LOG_MSG("XGA: DrawRect: Shouldn't be able to get here!");
+							srcval = 0;
 							break;
 					}
 					dstdata = XGA_GetPoint(srcx,srcy);
 
 					destval = XGA_GetMixResult(mixmode, srcval, dstdata);
 
-                    XGA_DrawPoint(srcx,srcy, destval);
+					XGA_DrawPoint(srcx,srcy, destval);
 					break;
 				default: 
-					LOG_MSG("XGA: DrawRect: Needs mixmode %x", mixmode);
+					LOG_MSG("XGA: DrawRect: Needs mixmode %x", (int)mixmode);
 					break;
 			}
 			srcx += dx;
@@ -640,7 +649,7 @@ void XGA_DrawWait(Bitu val, Bitu len) {
 						default:
 							// Let's hope they never show up ;)
 							LOG_MSG("XGA: unsupported bpp / datawidth combination %x",
-								xga.waitcmd.buswidth);
+								(int)xga.waitcmd.buswidth);
 							break;
 					};
 					break;
@@ -662,10 +671,14 @@ void XGA_DrawWait(Bitu val, Bitu len) {
 							chunksize=16;
 							if(len==4) chunks=2;
 							else chunks = 1;
-                           	break;
+							break;
 						case 0x60: // undocumented guess (but works)
 							chunksize=8;
 							chunks=4;
+							break;
+						default:
+							chunksize=0;
+							chunks=0;
 							break;
 					}
 					
@@ -688,7 +701,7 @@ void XGA_DrawWait(Bitu val, Bitu len) {
 									break;
 								default:
 									LOG_MSG("XGA: DrawBlitWait: Unsupported src %x",
-										(mixmode >> 5) & 0x03);
+										(int)((mixmode >> 5) & 0x03));
 									srcval=0;
 									break;
 							}
@@ -707,12 +720,12 @@ void XGA_DrawWait(Bitu val, Bitu len) {
 					break;
 
 				default:
-					LOG_MSG("XGA: DrawBlitWait: Unhandled mixmode: %d", mixmode);
+					LOG_MSG("XGA: DrawBlitWait: Unhandled mixmode: %d", (int)mixmode);
 					break;
 			} // switch mixmode
 			break;
 		default:
-			LOG_MSG("XGA: Unhandled draw command %x", xga.waitcmd.cmd);
+			LOG_MSG("XGA: Unhandled draw command %x", (int)xga.waitcmd.cmd);
 			break;
 	}
 }
@@ -787,6 +800,7 @@ void XGA_BlitRect(Bitu val) {
 					break;
 				case 0x02: /* Src is pixel data from PIX_TRANS register */
 					LOG_MSG("XGA: DrawPattern: Wants data from PIX_TRANS register");
+					srcval = 0;
 					break;
 				case 0x03: /* Src is bitmap data */
 					srcval = srcdata;
@@ -873,6 +887,7 @@ void XGA_DrawPattern(Bitu val) {
 					break;
 				case 0x02: /* Src is pixel data from PIX_TRANS register */
 					LOG_MSG("XGA: DrawPattern: Wants data from PIX_TRANS register");
+					srcval = 0;
 					break;
 				case 0x03: /* Src is bitmap data */
 					srcval = srcdata;
@@ -989,6 +1004,8 @@ void XGA_SetDualReg(Bit32u& reg, Bitu val) {
 			reg = (reg&0xffff0000)|(val&0x0000ffff);
 		xga.control1 ^= 0x10;
 		break;
+	default:
+		break;
 	}
 }
 
@@ -1003,6 +1020,8 @@ Bitu XGA_GetDualReg(Bit32u reg) {
 		xga.control1 ^= 0x10;
 		if (xga.control1 & 0x10) return reg&0x0000ffff;
 		else return reg>>16;
+	default:
+		break;
 	}
 	return 0;
 }
@@ -1165,7 +1184,7 @@ void XGA_Write(Bitu port, Bitu val, Bitu len) {
 				XGA_DrawWait(val, len);
 				
 			}
-			else LOG_MSG("XGA: Wrote to port %x with %x, len %x", port, val, len);
+			else LOG_MSG("XGA: Wrote to port %x with %x, len %x", (int)port, (int)val, (int)len);
 			break;
 	}
 }
@@ -1320,69 +1339,3 @@ void VGA_SetupXGA(void) {
 	IO_RegisterReadHandler(0xe2ea,&XGA_Read,IO_MB | IO_MW | IO_MD);
 }
 
-
-
-// save state support
-
-void POD_Save_VGA_XGA( std::ostream& stream )
-{
-	// static globals
-
-
-	// - pure struct data
-	WRITE_POD( &xga, xga );
-}
-
-
-void POD_Load_VGA_XGA( std::istream& stream )
-{
-	// static globals
-
-
-	// - pure struct data
-	READ_POD( &xga, xga );
-}
-
-
-/*
-ykhwong svn-daum 2012-02-20
-
-static globals:
-
-
-struct XGAStatus xga;
-
-
-// - pure struct data
-- struct scissorreg scissors
-  - Bit16u x1, y1, x2, y2;
-
-// - pure data
-- Bit32u readmask;
-- Bit32u writemask;
-- Bit32u forecolor;
-- Bit32u backcolor;
-- Bitu curcommand;
-- Bit16u foremix;
-- Bit16u backmix;
-- Bit16u curx, cury;
-- Bit16u destx, desty;
-- Bit16u ErrTerm;
-- Bit16u MIPcount;
-- Bit16u MAPcount;
-- Bit16u pix_cntl;
-- Bit16u control1;
-- Bit16u control2;
-- Bit16u read_sel;
-
-// - pure struct data
-- struct XGA_WaitCmd {
-	- bool newline;
-	- bool wait;
-	- Bit16u cmd;
-	- Bit16u curx, cury;
-	- Bit16u x1, y1, x2, y2, sizex, sizey;
-	- Bit32u data;
-	- Bitu datasize;
-	- Bitu buswidth;
-*/

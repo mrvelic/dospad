@@ -20,6 +20,7 @@ bool CPU_RDMSR();
 bool CPU_WRMSR();
 
 	CASE_0F_W(0x00)												/* GRP 6 Exxx */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_286) goto illegal_opcode;
 		{
 			if ((reg_flags & FLAG_VM) || (!cpu.pmode)) goto illegal_opcode;
 			GetRM;Bitu which=(rm>>3)&7;
@@ -63,18 +64,24 @@ bool CPU_WRMSR();
 		}
 		break;
 	CASE_0F_W(0x01)												/* Group 7 Ew */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_286) goto illegal_opcode;
 		{
 			GetRM;Bitu which=(rm>>3)&7;
 			if (rm < 0xc0)	{ //First ones all use EA
 				GetEAa;Bitu limit;
 				switch (which) {
+					/* NTS: The 286 is documented to write 0xFF in the most significant byte of the 6-byte field,
+					 *      while 386 and later is documented to write 0x00 (or the MSB of the base if 32-bit form).
+					 *      Some programs, including Microsoft Windows 3.0, execute SGDT and then compare the most
+					 *      significant byte against 0xFF. It does NOT use the standard Intel detection process. */
 				case 0x00:										/* SGDT */
 					SaveMw(eaa,CPU_SGDT_limit());
-					SaveMd(eaa+2,CPU_SGDT_base());
+					SaveMd(eaa+2,CPU_SGDT_base()|(CPU_ArchitectureType<CPU_ARCHTYPE_386?0xFF000000UL:0));
 					break;
+					/* NTS: Same comments for SIDT as SGDT */
 				case 0x01:										/* SIDT */
 					SaveMw(eaa,CPU_SIDT_limit());
-					SaveMd(eaa+2,CPU_SIDT_base());
+					SaveMd(eaa+2,CPU_SIDT_base()|(CPU_ArchitectureType<CPU_ARCHTYPE_386?0xFF000000UL:0));
 					break;
 				case 0x02:										/* LGDT */
 					if (cpu.pmode && cpu.cpl) EXCEPTION(EXCEPTION_GP);
@@ -92,6 +99,7 @@ bool CPU_WRMSR();
 					if (CPU_LMSW(limit)) RUNEXCEPTION();
 					break;
 				case 0x07:										/* INVLPG */
+					if (CPU_ArchitectureType<CPU_ARCHTYPE_486OLD) goto illegal_opcode;
 					if (cpu.pmode && cpu.cpl) EXCEPTION(EXCEPTION_GP);
 					PAGING_ClearTLB();
 					break;
@@ -118,6 +126,7 @@ bool CPU_WRMSR();
 		}
 		break;
 	CASE_0F_W(0x02)												/* LAR Gw,Ew */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_286) goto illegal_opcode;
 		{
 			if ((reg_flags & FLAG_VM) || (!cpu.pmode)) goto illegal_opcode;
 			GetRMrw;Bitu ar=*rmrw;
@@ -130,6 +139,7 @@ bool CPU_WRMSR();
 		}
 		break;
 	CASE_0F_W(0x03)												/* LSL Gw,Ew */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_286) goto illegal_opcode;
 		{
 			if ((reg_flags & FLAG_VM) || (!cpu.pmode)) goto illegal_opcode;
 			GetRMrw;Bitu limit=*rmrw;
@@ -142,6 +152,7 @@ bool CPU_WRMSR();
 		}
 		break;
 	CASE_0F_B(0x06)												/* CLTS */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_286) goto illegal_opcode;
 		if (cpu.pmode && cpu.cpl) EXCEPTION(EXCEPTION_GP);
 		cpu.cr0&=(~CR0_TASKSWITCH);
 		break;
@@ -151,12 +162,13 @@ bool CPU_WRMSR();
 		if (cpu.pmode && cpu.cpl) EXCEPTION(EXCEPTION_GP);
 		break;
 	CASE_0F_B(0x20)												/* MOV Rd.CRx */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		{
 			GetRM;
 			Bitu which=(rm >> 3) & 7;
 			if (rm < 0xc0 ) {
 				rm |= 0xc0;
-				LOG(LOG_CPU,LOG_ERROR)("MOV XXX,CR%u with non-register",which);
+				LOG(LOG_CPU,LOG_ERROR)("MOV XXX,CR%u with non-register",(int)which);
 			}
 			GetEArd;
 			Bit32u crx_value;
@@ -165,12 +177,13 @@ bool CPU_WRMSR();
 		}
 		break;
 	CASE_0F_B(0x21)												/* MOV Rd,DRx */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		{
 			GetRM;
 			Bitu which=(rm >> 3) & 7;
 			if (rm < 0xc0 ) {
 				rm |= 0xc0;
-				LOG(LOG_CPU,LOG_ERROR)("MOV XXX,DR%u with non-register",which);
+				LOG(LOG_CPU,LOG_ERROR)("MOV XXX,DR%u with non-register",(int)which);
 			}
 			GetEArd;
 			Bit32u drx_value;
@@ -179,36 +192,39 @@ bool CPU_WRMSR();
 		}
 		break;
 	CASE_0F_B(0x22)												/* MOV CRx,Rd */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		{
 			GetRM;
 			Bitu which=(rm >> 3) & 7;
 			if (rm < 0xc0 ) {
 				rm |= 0xc0;
-				LOG(LOG_CPU,LOG_ERROR)("MOV XXX,CR%u with non-register",which);
+				LOG(LOG_CPU,LOG_ERROR)("MOV XXX,CR%u with non-register",(int)which);
 			}
 			GetEArd;
 			if (CPU_WRITE_CRX(which,*eard)) RUNEXCEPTION();
 		}
 		break;
 	CASE_0F_B(0x23)												/* MOV DRx,Rd */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		{
 			GetRM;
 			Bitu which=(rm >> 3) & 7;
 			if (rm < 0xc0 ) {
 				rm |= 0xc0;
-				LOG(LOG_CPU,LOG_ERROR)("MOV DR%u,XXX with non-register",which);
+				LOG(LOG_CPU,LOG_ERROR)("MOV DR%u,XXX with non-register",(int)which);
 			}
 			GetEArd;
 			if (CPU_WRITE_DRX(which,*eard)) RUNEXCEPTION();
 		}
 		break;
 	CASE_0F_B(0x24)												/* MOV Rd,TRx */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		{
 			GetRM;
 			Bitu which=(rm >> 3) & 7;
 			if (rm < 0xc0 ) {
 				rm |= 0xc0;
-				LOG(LOG_CPU,LOG_ERROR)("MOV XXX,TR%u with non-register",which);
+				LOG(LOG_CPU,LOG_ERROR)("MOV XXX,TR%u with non-register",(int)which);
 			}
 			GetEArd;
 			Bit32u trx_value;
@@ -217,12 +233,13 @@ bool CPU_WRMSR();
 		}
 		break;
 	CASE_0F_B(0x26)												/* MOV TRx,Rd */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		{
 			GetRM;
 			Bitu which=(rm >> 3) & 7;
 			if (rm < 0xc0 ) {
 				rm |= 0xc0;
-				LOG(LOG_CPU,LOG_ERROR)("MOV TR%u,XXX with non-register",which);
+				LOG(LOG_CPU,LOG_ERROR)("MOV TR%u,XXX with non-register",(int)which);
 			}
 			GetEArd;
 			if (CPU_WRITE_TRX(which,*eard)) RUNEXCEPTION();
@@ -243,12 +260,64 @@ bool CPU_WRMSR();
 			reg_eax=(Bit32u)(tsc&0xffffffff);
 		}
 		break;
+
+	// Pentium Pro Conditional Moves
+	CASE_0F_W(0x40)												/* CMOVO */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond16(TFLG_O); break;
+	CASE_0F_W(0x41)												/* CMOVNO */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond16(TFLG_NO); break;
+	CASE_0F_W(0x42)												/* CMOVB */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond16(TFLG_B); break;
+	CASE_0F_W(0x43)												/* CMOVNB */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond16(TFLG_NB); break;
+	CASE_0F_W(0x44)												/* CMOVZ */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond16(TFLG_Z); break;
+	CASE_0F_W(0x45)												/* CMOVNZ */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond16(TFLG_NZ); break;
+	CASE_0F_W(0x46)												/* CMOVBE */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond16(TFLG_BE); break;
+	CASE_0F_W(0x47)												/* CMOVNBE */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond16(TFLG_NBE); break;
+	CASE_0F_W(0x48)												/* CMOVS */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond16(TFLG_S); break;
+	CASE_0F_W(0x49)												/* CMOVNS */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond16(TFLG_NS); break;
+	CASE_0F_W(0x4A)												/* CMOVP */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond16(TFLG_P); break;
+	CASE_0F_W(0x4B)												/* CMOVNP */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond16(TFLG_NP); break;
+	CASE_0F_W(0x4C)												/* CMOVL */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond16(TFLG_L); break;
+	CASE_0F_W(0x4D)												/* CMOVNL */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond16(TFLG_NL); break;
+	CASE_0F_W(0x4E)												/* CMOVLE */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond16(TFLG_LE); break;
+	CASE_0F_W(0x4F)												/* CMOVNLE */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_PPROSLOW) goto illegal_opcode;
+		MoveCond16(TFLG_NLE); break;
+
 	CASE_0F_B(0x32)												/* RDMSR */
 		{
 			if (CPU_ArchitectureType<CPU_ARCHTYPE_PENTIUM) goto illegal_opcode;
 			if (!CPU_RDMSR()) goto illegal_opcode;
 		}
 		break;
+#if CPU_CORE >= CPU_ARCHTYPE_386
 	CASE_0F_W(0x80)												/* JO */
 		JumpCond16_w(TFLG_O);break;
 	CASE_0F_W(0x81)												/* JNO */
@@ -313,16 +382,19 @@ bool CPU_WRMSR();
 		SETcc(TFLG_LE);break;
 	CASE_0F_B(0x9f)												/* SETNLE */
 		SETcc(TFLG_NLE);break;
-
+#endif
 	CASE_0F_W(0xa0)												/* PUSH FS */		
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		Push_16(SegValue(fs));break;
 	CASE_0F_W(0xa1)												/* POP FS */	
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		if (CPU_PopSeg(fs,false)) RUNEXCEPTION();
 		break;
 	CASE_0F_B(0xa2)												/* CPUID */
 		if (!CPU_CPUID()) goto illegal_opcode;
 		break;
 	CASE_0F_W(0xa3)												/* BT Ew,Gw */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		{
 			FillFlags();GetRMrw;
 			Bit16u mask=1 << (*rmrw & 15);
@@ -337,17 +409,22 @@ bool CPU_WRMSR();
 			break;
 		}
 	CASE_0F_W(0xa4)												/* SHLD Ew,Gw,Ib */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		RMEwGwOp3(DSHLW,Fetchb());
 		break;
 	CASE_0F_W(0xa5)												/* SHLD Ew,Gw,CL */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		RMEwGwOp3(DSHLW,reg_cl);
 		break;
 	CASE_0F_W(0xa8)												/* PUSH GS */		
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		Push_16(SegValue(gs));break;
 	CASE_0F_W(0xa9)												/* POP GS */		
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		if (CPU_PopSeg(gs,false)) RUNEXCEPTION();
 		break;
 	CASE_0F_W(0xab)												/* BTS Ew,Gw */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		{
 			FillFlags();GetRMrw;
 			Bit16u mask=1 << (*rmrw & 15);
@@ -364,9 +441,11 @@ bool CPU_WRMSR();
 			break;
 		}
 	CASE_0F_W(0xac)												/* SHRD Ew,Gw,Ib */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		RMEwGwOp3(DSHRW,Fetchb());
 		break;
 	CASE_0F_W(0xad)												/* SHRD Ew,Gw,CL */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		RMEwGwOp3(DSHRW,reg_cl);
 		break;
 	CASE_0F_W(0xaf)												/* IMUL Gw,Ew */
@@ -430,6 +509,7 @@ bool CPU_WRMSR();
 		}
 
 	CASE_0F_W(0xb2)												/* LSS Ew */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		{	
 			GetRMrw;
 			if (rm >= 0xc0) goto illegal_opcode;
@@ -439,6 +519,7 @@ bool CPU_WRMSR();
 			break;
 		}
 	CASE_0F_W(0xb3)												/* BTR Ew,Gw */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		{
 			FillFlags();GetRMrw;
 			Bit16u mask=1 << (*rmrw & 15);
@@ -455,6 +536,7 @@ bool CPU_WRMSR();
 			break;
 		}
 	CASE_0F_W(0xb4)												/* LFS Ew */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		{	
 			GetRMrw;
 			if (rm >= 0xc0) goto illegal_opcode;
@@ -464,6 +546,7 @@ bool CPU_WRMSR();
 			break;
 		}
 	CASE_0F_W(0xb5)												/* LGS Ew */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		{	
 			GetRMrw;
 			if (rm >= 0xc0) goto illegal_opcode;
@@ -473,6 +556,7 @@ bool CPU_WRMSR();
 			break;
 		}
 	CASE_0F_W(0xb6)												/* MOVZX Gw,Eb */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		{
 			GetRMrw;															
 			if (rm >= 0xc0 ) {GetEArb;*rmrw=*earb;}
@@ -481,6 +565,7 @@ bool CPU_WRMSR();
 		}
 	CASE_0F_W(0xb7)												/* MOVZX Gw,Ew */
 	CASE_0F_W(0xbf)												/* MOVSX Gw,Ew */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		{
 			GetRMrw;															
 			if (rm >= 0xc0 ) {GetEArw;*rmrw=*earw;}
@@ -488,6 +573,7 @@ bool CPU_WRMSR();
 			break;
 		}
 	CASE_0F_W(0xba)												/* GRP8 Ew,Ib */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		{
 			FillFlags();GetRM;
 			if (rm >= 0xc0 ) {
@@ -532,6 +618,7 @@ bool CPU_WRMSR();
 			break;
 		}
 	CASE_0F_W(0xbb)												/* BTC Ew,Gw */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		{
 			FillFlags();GetRMrw;
 			Bit16u mask=1 << (*rmrw & 15);
@@ -548,6 +635,7 @@ bool CPU_WRMSR();
 			break;
 		}
 	CASE_0F_W(0xbc)												/* BSF Gw,Ew */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		{
 			GetRMrw;
 			Bit16u result,value;
@@ -565,6 +653,7 @@ bool CPU_WRMSR();
 			break;
 		}
 	CASE_0F_W(0xbd)												/* BSR Gw,Ew */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		{
 			GetRMrw;
 			Bit16u result,value;
@@ -582,6 +671,7 @@ bool CPU_WRMSR();
 			break;
 		}
 	CASE_0F_W(0xbe)												/* MOVSX Gw,Eb */
+		if (CPU_ArchitectureType<CPU_ARCHTYPE_386) goto illegal_opcode;
 		{
 			GetRMrw;															
 			if (rm >= 0xc0 ) {GetEArb;*rmrw=*(Bit8s *)earb;}
@@ -604,6 +694,23 @@ bool CPU_WRMSR();
 			else {GetEAa;*rmrw=LoadMw(eaa);SaveMw(eaa,LoadMw(eaa)+oldrmrw);}
 			break;
 		}
+    CASE_0F_W(0xc7)
+        {
+            extern bool enable_cmpxchg8b;
+            void CPU_CMPXCHG8B(PhysPt eaa);
+
+            if (!enable_cmpxchg8b || CPU_ArchitectureType<CPU_ARCHTYPE_PENTIUM) goto illegal_opcode;
+            GetRM;
+            if (((rm >> 3) & 7) == 1) { // CMPXCHG8B /1 r/m
+                if (rm >= 0xc0 ) goto illegal_opcode;
+                GetEAa;
+                CPU_CMPXCHG8B(eaa);
+            }
+            else {
+                goto illegal_opcode;
+            }
+            break;
+        }
 	CASE_0F_W(0xc8)												/* BSWAP AX */
 		if (CPU_ArchitectureType<CPU_ARCHTYPE_486OLD) goto illegal_opcode;
 		BSWAPW(reg_ax);break;

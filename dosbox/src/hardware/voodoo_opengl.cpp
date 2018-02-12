@@ -32,7 +32,6 @@
 
 #include "voodoo_def.h"
 
-
 SDL_Surface* ogl_surface = NULL;
 
 INT32 cached_line_front_y=-1;
@@ -67,6 +66,25 @@ UINT32 texrgb[256*256];
 /* texture address map */
 std::map <const UINT32, ogl_texmap> textures[2];
 
+void GFX_PreventFullscreen(bool lockout);
+
+int Voodoo_OGL_GetWidth() {
+	if (v != NULL)
+		return v->fbi.width;
+	else
+		return 0;
+}
+
+int Voodoo_OGL_GetHeight() {
+	if (v != NULL)
+		return v->fbi.height;
+	else
+		return 0;
+}
+
+bool Voodoo_OGL_Active() {
+	return (v != NULL && v->clock_enabled && v->output_on);
+}
 
 static void ogl_get_depth(voodoo_state* VV, INT32 ITERZ, INT64 ITERW, INT32 *depthval, INT32 *out_wfloat)
 {
@@ -481,6 +499,7 @@ void ogl_cache_texture(const poly_extra_data *extra, ogl_texture_data *td) {
 				glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,TEXMODE_CLAMP_S(TEXMODE)?GL_CLAMP_TO_EDGE:GL_REPEAT);
 				glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,TEXMODE_CLAMP_T(TEXMODE)?GL_CLAMP_TO_EDGE:GL_REPEAT);
 				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, smax, tmax, 0, GL_BGRA_EXT, GL_UNSIGNED_INT_8_8_8_8_REV, texrgbp);
+				extern PFNGLGENERATEMIPMAPEXTPROC glGenerateMipmapEXT;
 				glGenerateMipmapEXT(GL_TEXTURE_2D);
 				UINT32 palsum=0;
 				if ((TEXMODE_FORMAT(v->tmu[j].reg[textureMode].u)==0x05) || (TEXMODE_FORMAT(v->tmu[j].reg[textureMode].u)==0x0e)) {
@@ -920,7 +939,7 @@ void ogl_shaders(const poly_extra_data *extra) {
 	/* shaders extensions not loaded */
 	if (!glCreateShaderObjectARB) return;
 
-	UINT32 FBZMODE      = extra->r_fbzMode;
+//	UINT32 FBZMODE      = extra->r_fbzMode;
 	UINT32 FOGMODE      = extra->r_fogMode;
 	UINT32 texcount     = extra->texcount;
 
@@ -1053,9 +1072,9 @@ void ogl_shaders(const poly_extra_data *extra) {
 
 		/* use this shader */
 		glUseProgramObjectARB(m_hProgramObject);
-		extra->info->so_shader_program=(UINT32)m_hProgramObject;
-		extra->info->so_vertex_shader=(UINT32)m_hVertexShader;
-		extra->info->so_fragment_shader=(UINT32)m_hFragmentShader;
+		extra->info->so_shader_program=(uintptr_t)m_hProgramObject;
+		extra->info->so_vertex_shader=(uintptr_t)m_hVertexShader;
+		extra->info->so_fragment_shader=(uintptr_t)m_hFragmentShader;
 
 		extra->info->shader_ready=true;
 
@@ -1163,7 +1182,7 @@ void voodoo_ogl_draw_triangle(poly_extra_data *extra) {
 		for (int t=0; t<2; t++)
 		if ( td[t].enable ) {
 			UINT32 TEXMODE = v->tmu[t].reg[textureMode].u;
-			glActiveTextureARB(GL_TEXTURE0_ARB+t);
+			glActiveTexture(GL_TEXTURE0_ARB+t);
 			glBindTexture (GL_TEXTURE_2D, td[t].texID);
 			if (!extra->info->shader_ready) {
 				glEnable (GL_TEXTURE_2D);
@@ -1244,7 +1263,7 @@ void voodoo_ogl_draw_triangle(poly_extra_data *extra) {
 
 		for (int t=0;t<2;t++)
 			if (td[t].enable) {
-				glMultiTexCoord4fvARB(GL_TEXTURE0_ARB+t,&vd[i].m[t].sw);
+				glMultiTexCoord4fv(GL_TEXTURE0_ARB+t,&vd[i].m[t].sw);
 				if (extra->info->shader_ulocations[10+t] >= 0)
 					glVertexAttrib1fARB(extra->info->shader_ulocations[10+t],vd[i].m[t].lodblend);
 			}
@@ -1268,10 +1287,6 @@ void voodoo_ogl_draw_triangle(poly_extra_data *extra) {
 
 
 void voodoo_ogl_swap_buffer() {
-	if (GFX_LazyFullscreenRequested()) {
-		v->ogl_dimchange = true;
-	}
-
 	VOGL_ClearBeginMode();
 
 	SDL_GL_SwapBuffers();
@@ -1301,6 +1316,8 @@ void voodoo_ogl_texture_clear(UINT32 texbase, int TMU) {
 }
 
 void voodoo_ogl_draw_pixel(int x, int y, bool has_rgb, bool has_alpha, int r, int g, int b, int a) {
+	GLfloat x2, y2;
+
 	if (m_hProgramObject != 0) {
 		glUseProgramObjectARB(0);
 		m_hProgramObject = 0;
@@ -1320,9 +1337,12 @@ void voodoo_ogl_draw_pixel(int x, int y, bool has_rgb, bool has_alpha, int r, in
 
 	VOGL_SetAlphaMode(0, 0,0,0,0);
 
+	x2 = (GLfloat) x + 0.5;
+	y2 = (GLfloat) y + 0.5;
+
 	VOGL_BeginMode(GL_POINTS);
 	glColor4ub((GLubyte)(r&0xff), (GLubyte)(g&0xff), (GLubyte)(b&0xff), (GLubyte)(a&0xff));
-	glVertex2i(x, y);
+	glVertex2f(x2, y2);
 }
 
 void voodoo_ogl_draw_z(int x, int y, int z) {
@@ -1355,6 +1375,7 @@ void voodoo_ogl_draw_z(int x, int y, int z) {
 
 void voodoo_ogl_draw_pixel_pipeline(int x, int y, int r, int g, int b) {
 //	VOGL_ClearBeginMode();
+	GLfloat x2, y2;
 
 	// TODO redo everything //
 	if (m_hProgramObject != 0) {
@@ -1386,11 +1407,14 @@ void voodoo_ogl_draw_pixel_pipeline(int x, int y, int r, int g, int b) {
 		VOGL_SetAlphaMode(0, 0,0,0,0);
 	}
 
+	x2 = (GLfloat) x + 0.5;
+	y2 = (GLfloat) y + 0.5;
+
 	VOGL_BeginMode(GL_POINTS);
 //	glBegin(GL_POINTS);
 //	glColor3f((float)r/255.0f, (float)g/255.0f, (float)b/255.0f);
 	glColor3ub((GLubyte)(r&0xff), (GLubyte)(g&0xff), (GLubyte)(b&0xff));
-	glVertex2f((float)x, (float)y);
+	glVertex2f(x2, y2);
 //	glEnd();
 }
 
@@ -1438,7 +1462,7 @@ void voodoo_ogl_fastfill(void) {
 
 	bool scissors_needed = true;
 	if ((sx == 0) && (sy == 0)) {
-		if ((ex == v->fbi.width) && (ey == v->fbi.height)) scissors_needed = false;
+		if (((Bitu)ex == (Bitu)v->fbi.width) && ((Bitu)ey == (Bitu)v->fbi.height)) scissors_needed = false;
 	}
 
 	if (scissors_needed) {
@@ -1577,7 +1601,7 @@ void voodoo_ogl_set_window(voodoo_state *v) {
 	if (size_changed) {
 		//correction for viewport if 640x400
 		if( v->fbi.height < 480 && GFX_IsFullscreen()) adjust_y=(480-v->fbi.height)/2;
-		if( v->fbi.height < 640 && GFX_IsFullscreen()) adjust_x=(640-v->fbi.width)/2;
+		if( v->fbi.width < 640 && GFX_IsFullscreen()) adjust_x=(640-v->fbi.width)/2;
 		glViewport( adjust_x, adjust_y, v->fbi.width, v->fbi.height );
 		last_width = v->fbi.width;
 		last_height = v->fbi.height;
@@ -1585,6 +1609,14 @@ void voodoo_ogl_set_window(voodoo_state *v) {
 }
 
 void voodoo_ogl_reset_videomode(void) {
+#if defined(WIN32) && !defined(C_SDL2)
+    /* always show the menu */
+    void DOSBox_SetMenu(void);
+    DOSBox_SetMenu();
+#endif
+
+    GFX_PreventFullscreen(true);
+
 	last_clear_color=0;
 
 	last_width=0;
@@ -1611,6 +1643,13 @@ void voodoo_ogl_reset_videomode(void) {
 
 	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
+	/*glMatrixMode( GL_PROJECTION );
+	glLoadIdentity();
+	glOrtho( 0, v->fbi.width, v->fbi.height, 0, -1, 1 );
+	glMatrixMode( GL_MODELVIEW );
+	glLoadIdentity();*/
+	// END OF FIX
+
 #if defined (WIN32) && SDL_VERSION_ATLEAST(1, 2, 11)
 	SDL_GL_SetAttribute( SDL_GL_SWAP_CONTROL, 0 );
 #endif
@@ -1620,22 +1659,17 @@ void voodoo_ogl_reset_videomode(void) {
 	SDL_GL_SetAttribute( SDL_GL_ACCELERATED_VISUAL, 1 );
 #endif
 
-	if (ogl_surface != NULL) {
-		SDL_FreeSurface(ogl_surface);
-		ogl_surface = NULL;
-	}
+    ogl_surface = NULL;
+
+    void GFX_ReleaseMouse(void);
+    void GFX_ForceFullscreenExit(void);
+
+    GFX_ReleaseMouse();
+    GFX_ForceFullscreenExit();
 
 	Uint32 sdl_flags = SDL_OPENGL;
 
-	if (GFX_LazyFullscreenRequested()) GFX_SwitchFullscreenNoReset();
-
-	if (GFX_IsFullscreen()) {
-		sdl_flags |= SDL_FULLSCREEN;
-	} else {
-		ogl_surface = SDL_SetVideoMode(v->fbi.width, v->fbi.height, 32, sdl_flags);
-	}
-
-	if ((ogl_surface != NULL) && (sdl_flags & SDL_FULLSCREEN)) SDL_Delay(500);
+    ogl_surface = SDL_SetVideoMode(v->fbi.width, v->fbi.height, 32, sdl_flags);
 
 	if (ogl_surface == NULL) {
 		if (full_sdl_restart) {
@@ -1646,13 +1680,13 @@ void voodoo_ogl_reset_videomode(void) {
 		if (ogl_surface == NULL) {
 			has_alpha = false;
 			SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 0);
-			if (SDL_SetVideoMode(v->fbi.width, v->fbi.height, 32, sdl_flags) == 0) {
+			if ((ogl_surface = SDL_SetVideoMode(v->fbi.width, v->fbi.height, 32, sdl_flags)) == NULL) {
 				has_stencil = false;
 				SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 0);
-				if (SDL_SetVideoMode(v->fbi.width, v->fbi.height, 32, sdl_flags) == 0) {
+				if ((ogl_surface = SDL_SetVideoMode(v->fbi.width, v->fbi.height, 32, sdl_flags)) == NULL) {
 					if (sdl_flags & SDL_FULLSCREEN) {
 						sdl_flags &= ~(SDL_FULLSCREEN);
-						if (SDL_SetVideoMode(v->fbi.width, v->fbi.height, 32, sdl_flags) == 0) {
+						if ((ogl_surface = SDL_SetVideoMode(v->fbi.width, v->fbi.height, 32, sdl_flags)) == NULL) {
 							E_Exit("VOODOO: opengl init error");
 						}
 					} else {
@@ -1666,7 +1700,17 @@ void voodoo_ogl_reset_videomode(void) {
 		}
 	}
 
-	GFX_SwitchLazyFullscreen(true);
+    v->ogl_dimchange = true;
+
+	glViewport( 0, 0, v->fbi.width, v->fbi.height );
+	last_width = v->fbi.width;
+	last_height = v->fbi.height;
+
+    /* NTS: Some demoscene 3Dfx stuff looks terrible without this.
+     *      This is said to be the initial state of an OpenGL context.
+     *      This is in direct contradiction to the OpenGL output setup
+     *      in src/gui/sdlmain.cpp that sets up GL_FLAT shading */
+    glShadeModel (GL_SMOOTH);
 
 	GFX_UpdateSDLCaptureState();
 
@@ -1705,6 +1749,16 @@ void voodoo_ogl_reset_videomode(void) {
 	} else if (depth_csize < 16) {
 		LOG_MSG("VOODOO: OpenGL: invalid depth size %d",depth_csize);
 	}
+
+#if defined(WIN32) && !defined(C_SDL2)
+	// Windows SDL 1.x builds may destroy and re-create the window, and lose our menu bar.
+	// make sure to put it back.
+	void DOSBox_SetMenu(void);
+	DOSBox_SetMenu();
+#endif
+
+	/* Something in Windows keeps changing the shade model on us from the last glShadeModel() call. Change it back. */
+	glShadeModel(GL_SMOOTH);
 
 	LOG_MSG("VOODOO: OpenGL: mode set, resolution %d:%d %s", v->fbi.width, v->fbi.height, (sdl_flags & SDL_FULLSCREEN) ? "(fullscreen)" : "");
 }
@@ -1816,13 +1870,10 @@ void voodoo_ogl_leave(bool leavemode) {
 	if (leavemode) {
 		LOG_MSG("VOODOO: OpenGL: quit");
 
-		GFX_SwitchLazyFullscreen(false);
-		if (ogl_surface != NULL) {
-			SDL_FreeSurface(ogl_surface);
-			ogl_surface = NULL;
-		}
-		GFX_RestoreMode();
-	}
+        ogl_surface = NULL;
+        GFX_PreventFullscreen(false);
+        GFX_RestoreMode();
+    }
 }
 
 void voodoo_ogl_shutdown(voodoo_state *v) {
@@ -1841,9 +1892,6 @@ bool voodoo_ogl_init(voodoo_state *v) {
 }
 
 void voodoo_ogl_leave(void) {
-}
-
-void voodoo_ogl_leave(bool dummy) {
 }
 
 void voodoo_ogl_shutdown(voodoo_state *v) {
@@ -1889,16 +1937,8 @@ void voodoo_ogl_draw_z(int x, int y, int z1, int z2) {
 	E_Exit("invalid call to voodoo_ogl_draw_z");
 }
 
-void voodoo_ogl_draw_z(int x, int y, int z) {
-    E_Exit("invalid call to voodoo_ogl_draw_z");
-}
-
 void voodoo_ogl_draw_pixel_pipeline(int x, int y, int r, int g, int b) {
 	E_Exit("invalid call to voodoo_ogl_draw_pixel_pipeline");
-}
-
-void voodoo_ogl_update_dimensions(void) {
-    E_Exit("invalid call to voodoo_ogl_update_dimensions");
 }
 
 UINT32 voodoo_ogl_read_pixel(int x, int y) {
@@ -1910,5 +1950,6 @@ UINT32 voodoo_ogl_read_pixel(int x, int y) {
 void voodoo_ogl_draw_triangle(poly_extra_data *extra) {
 	E_Exit("invalid call to voodoo_ogl_draw_triangle");
 }
+
 
 #endif

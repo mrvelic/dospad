@@ -24,6 +24,13 @@
 #include "dos_inc.h"
 #include <list>
 
+Bit32u DOS_HMA_LIMIT();
+Bit32u DOS_HMA_FREE_START();
+Bit32u DOS_HMA_GET_FREE_SPACE();
+void DOS_HMA_CLAIMED(Bitu bytes);
+
+extern bool enable_share_exe_fake;
+
 extern Bitu XMS_EnableA20(bool enable);
 
 bool enable_a20_on_windows_init = false;
@@ -72,7 +79,7 @@ static Bitu INT2F_Handler(void) {
 	for(Multiplex_it it = Multiplex.begin();it != Multiplex.end();it++)
 		if( (*it)() ) return CBRET_NONE;
    
-	LOG(LOG_DOSMISC,LOG_ERROR)("DOS:Multiplex Unhandled call %4X",reg_ax);
+	LOG(LOG_DOSMISC,LOG_ERROR)("DOS:INT 2F Unhandled call AX=%4X",reg_ax);
 	return CBRET_NONE;
 }
 
@@ -81,11 +88,17 @@ static Bitu INT2A_Handler(void) {
 	return CBRET_NONE;
 }
 
+// INT 2F
 static bool DOS_MultiplexFunctions(void) {
 	switch (reg_ax) {
 	/* ert, 20100711: Locking extensions */
 	case 0x1000:	/* SHARE.EXE installation check */
-		reg_ax=0xffff; /* Pretend that share.exe is installed.. Of course it's a bloody LIE! */
+		if (enable_share_exe_fake) {
+			reg_ax=0xffff; /* Pretend that share.exe is installed.. Of course it's a bloody LIE! */
+		}
+		else {
+			return false; /* pass it on */
+		}
 		break;
 	case 0x1216:	/* GET ADDRESS OF SYSTEM FILE TABLE ENTRY */
 		// reg_bx is a system file table entry, should coincide with
@@ -281,14 +294,61 @@ static bool DOS_MultiplexFunctions(void) {
 	case 0x168f:	/*  Close awareness crap */
 	   /* Removing warning */
 		return true;
-	case 0x4a01:	/* Query free hma space */
-	case 0x4a02:	/* ALLOCATE HMA SPACE */
-		LOG(LOG_DOSMISC,LOG_WARN)("INT 2f:4a HMA. DOSBox reports none available.");
-		reg_bx=0;	//number of bytes available in HMA or amount successfully allocated
-		//ESDI=ffff:ffff Location of HMA/Allocated memory
+	case 0x4a01: {	/* Query free hma space */
+		Bit32u limit = DOS_HMA_LIMIT();
+
+		if (limit == 0) {
+			/* TODO: What does MS-DOS prior to v5.0? */
+			reg_bx = 0;
+			reg_di = 0xFFFF;
+			SegSet16(es,0xFFFF);
+			LOG(LOG_MISC,LOG_DEBUG)("HMA query: rejected");
+			return true;
+		}
+
+		Bit32u start = DOS_HMA_FREE_START();
+		reg_bx = limit - start; /* free space in bytes */
 		SegSet16(es,0xffff);
-		reg_di=0xffff;
-		return true;
+		reg_di = (start + 0x10) & 0xFFFF;
+		LOG(LOG_MISC,LOG_DEBUG)("HMA query: start=0x%06x limit=0x%06x free=0x%06x -> bx=%u %04x:%04x",
+			start,limit,DOS_HMA_GET_FREE_SPACE(),(int)reg_bx,(int)SegValue(es),(int)reg_di);
+		} return true;
+	case 0x4a02: {	/* ALLOCATE HMA SPACE */
+		Bit32u limit = DOS_HMA_LIMIT();
+
+		if (limit == 0) {
+			/* TODO: What does MS-DOS prior to v5.0? */
+			reg_bx = 0;
+			reg_di = 0xFFFF;
+			SegSet16(es,0xFFFF);
+			LOG(LOG_MISC,LOG_DEBUG)("HMA allocation: rejected");
+			return true;
+		}
+
+		/* NTS: According to RBIL, Windows 95 adds a deallocate function and changes HMA allocation up to follow a
+		 *      MCB chain structure. Which is something we're probably not going to add for awhile. */
+		/* FIXME: So, according to Ralph Brown Interrupt List, MS-DOS 5 and 6 liked to round up to the next paragraph? */
+		if (dos.version.major < 7 && (reg_bx & 0xF) != 0)
+			reg_bx = (reg_bx + 0xF) & (~0xF);
+
+		Bit32u start = DOS_HMA_FREE_START();
+		if ((start+reg_bx) > limit) {
+			LOG(LOG_MISC,LOG_DEBUG)("HMA allocation: rejected (not enough room) for %u bytes (0x%x + 0x%x > 0x%x)",reg_bx,
+                (unsigned int)start,(unsigned int)reg_bx,(unsigned int)limit);
+			reg_bx = 0;
+			reg_di = 0xFFFF;
+			SegSet16(es,0xFFFF);
+			return true;
+		}
+
+		/* convert the start to segment:offset, normalized to FFFF:offset */
+		reg_di = (start + 0x10) & 0xFFFF;
+		SegSet16(es,0xFFFF);
+
+		/* let HMA emulation know what was claimed */
+		LOG(LOG_MISC,LOG_DEBUG)("HMA allocation: %u bytes at FFFF:%04x",reg_bx,reg_di);
+		DOS_HMA_CLAIMED(reg_bx);
+		} return true;
 	}
 
 	return false;

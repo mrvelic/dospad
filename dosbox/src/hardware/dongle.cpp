@@ -3,6 +3,7 @@
 #include "inout.h"
 #include "pic.h"
 #include "setup.h"
+#include "control.h"
 
 /*
 
@@ -32,13 +33,7 @@ More information: http://blogs.conus.info/node/56
 
 */
 
-#define DONGLE_BASE 0x0378
-
-static void DONGLE_disable(Bitu) {
-}
-
-static void DONGLE_enable(Bitu freq) {
-}
+#define DONGLE_BASE		0x0378
 
 #define IS_SET(flag, bit)       ((flag) & (bit))
 
@@ -171,21 +166,38 @@ public:
 
 		WriteHandler.Install(DONGLE_BASE,dongle_write,IO_MB,3);
 		ReadHandler.Install(DONGLE_BASE,dongle_read,IO_MB,3);
-
-		DONGLE_disable(0);
 	}
 	~DONGLE(){
-		DONGLE_disable(0);
 	}
 };
 
-static DONGLE* test;
+static DONGLE* test = NULL;
 
 static void DONGLE_ShutDown(Section* sec){
-	delete test;
+    if (test) {
+        delete test;
+        test = NULL;
+    }
 }
 
-void DONGLE_Init(Section* sec) {
-	test = new DONGLE(sec);
-	sec->AddDestroyFunction(&DONGLE_ShutDown,true);
+static void DONGLE_OnEnterPC98(Section* sec){
+    if (test) {
+        delete test;
+        test = NULL;
+    }
+}
+
+void DONGLE_OnReset(Section* sec) {
+	if (test == NULL) {
+		LOG(LOG_MISC,LOG_DEBUG)("Allocating parallel dongle emulation");
+		test = new DONGLE(control->GetSection("parallel"));
+	}
+}
+
+void DONGLE_Init() {
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing dongle emulation");
+
+	AddExitFunction(AddExitFunctionFuncPair(DONGLE_ShutDown),true);
+	AddVMEventFunction(VM_EVENT_RESET,AddVMEventFunctionFuncPair(DONGLE_OnReset));
+	AddVMEventFunction(VM_EVENT_ENTER_PC98_MODE,AddVMEventFunctionFuncPair(DONGLE_OnEnterPC98));
 }

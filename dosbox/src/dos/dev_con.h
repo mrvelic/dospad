@@ -21,11 +21,22 @@
 #include "../ints/int10.h"
 #include <string.h>
 #include "inout.h"
+#include "shiftjis.h"
 #include "callback.h"
 
 #define NUMBER_ANSI_DATA 10
 
 extern bool DOS_BreakFlag;
+
+Bitu INT10_Handler(void);
+Bitu INT16_Handler_Wrap(void);
+
+ShiftJISDecoder con_sjis;
+
+Bit16u last_int16_code = 0;
+
+static size_t dev_con_pos=0,dev_con_max=0;
+static char dev_con_readbuf[64];
 
 class device_CON : public DOS_Device {
 public:
@@ -38,15 +49,13 @@ public:
 	Bit16u GetInformation(void);
 	bool ReadFromControlChannel(PhysPt bufptr,Bit16u size,Bit16u * retcode){return false;}
 	bool WriteToControlChannel(PhysPt bufptr,Bit16u size,Bit16u * retcode){return false;}
-
-	virtual void SaveState( std::ostream& stream );
-	virtual void LoadState( std::istream& stream );
 private:
 	Bit8u readcache;
 	Bit8u lastwrite;
 	struct ansi { /* should create a constructor, which would fill them with the appropriate values */
 		bool esc;
 		bool sci;
+        bool pc98rab;       // PC-98 ESC [ > ...    (right angle bracket) I will rename this variable if MS-DOS ANSI.SYS also supports this sequence
 		bool enabled;
 		Bit8u attr;
 		Bit8u data[NUMBER_ANSI_DATA];
@@ -69,27 +78,127 @@ private:
 		reg_dh=row;
 		reg_dl=col;
 		reg_bh=page;
-		CALLBACK_RunRealInt(0x10);
+
+        /* FIXME: PC-98 emulation should eventually use CONIO emulation that
+         *        better emulates the actual platform. The purpose of this
+         *        hack is to allow our code to call into INT 10h without
+         *        setting up an INT 10h vector */
+        if (IS_PC98_ARCH)
+            INT10_Handler();
+        else
+            CALLBACK_RunRealInt(0x10);
 
 		reg_ax=oldax;
 		reg_bx=oldbx;
 		reg_dx=olddx;
 	}
 
+    /* Common function to turn specific scan codes into ANSI codes.
+     * This is a separate function so that both Read() and GetInformation() can use it.
+     * GetInformation needs to handle the scan code on entry in order to correctly
+     * assert whether Read() will return data or not. Some scan codes are ignored by
+     * the CON driver, therefore even though the BIOS says there is key data, Read()
+     * will not return anything and will block. */
+    bool CommonPC98ExtScanConversionToReadBuf(unsigned char code) {
+        switch (code) {
+            case 0x39: // DEL
+                dev_con_readbuf[0] = 0x1B; dev_con_readbuf[1] = 0x44; dev_con_pos=0; dev_con_max=2;
+                return true;
+            case 0x3A: // up arrow
+                dev_con_readbuf[0] = 0x0B; dev_con_pos=0; dev_con_max=1;
+                return true;
+            case 0x3B: // left arrow
+                dev_con_readbuf[0] = 0x08; dev_con_pos=0; dev_con_max=1;
+                return true;
+            case 0x3C: // right arrow
+                dev_con_readbuf[0] = 0x0C; dev_con_pos=0; dev_con_max=1;
+                return true;
+            case 0x3D: // down arrow
+                dev_con_readbuf[0] = 0x0A; dev_con_pos=0; dev_con_max=1;
+                return true;
+            case 0x62: // F1
+                dev_con_readbuf[0] = 0x1B; dev_con_readbuf[1] = 0x53; dev_con_pos=0; dev_con_max=2;
+                return true;
+            case 0x63: // F2
+                dev_con_readbuf[0] = 0x1B; dev_con_readbuf[1] = 0x54; dev_con_pos=0; dev_con_max=2;
+                return true;
+            case 0x64: // F3
+                dev_con_readbuf[0] = 0x1B; dev_con_readbuf[1] = 0x55; dev_con_pos=0; dev_con_max=2;
+                return true;
+            case 0x65: // F4
+                dev_con_readbuf[0] = 0x1B; dev_con_readbuf[1] = 0x56; dev_con_pos=0; dev_con_max=2;
+                return true;
+            case 0x66: // F5
+                dev_con_readbuf[0] = 0x1B; dev_con_readbuf[1] = 0x57; dev_con_pos=0; dev_con_max=2;
+                return true;
+            case 0x67: // F6
+                dev_con_readbuf[0] = 0x1B; dev_con_readbuf[1] = 0x45; dev_con_pos=0; dev_con_max=2;
+                return true;
+            case 0x68: // F7
+                dev_con_readbuf[0] = 0x1B; dev_con_readbuf[1] = 0x4A; dev_con_pos=0; dev_con_max=2;
+                return true;
+            case 0x69: // F8
+                dev_con_readbuf[0] = 0x1B; dev_con_readbuf[1] = 0x50; dev_con_pos=0; dev_con_max=2;
+                return true;
+            case 0x6A: // F9
+                dev_con_readbuf[0] = 0x1B; dev_con_readbuf[1] = 0x51; dev_con_pos=0; dev_con_max=2;
+                return true;
+            case 0x6B: // F10
+                dev_con_readbuf[0] = 0x1B; dev_con_readbuf[1] = 0x5A; dev_con_pos=0; dev_con_max=2;
+                return true;
+#if 0
+                // INS      0x1B 0x50   0x1B 0x50   0x1B 0x50
+                // ROLL UP  --          --          --
+                // POLL DOWN--          --          --
+                // COPY     --          --          --
+                // HOME/CLR 0x1A        0x1E        --
+                // HELP     --          --          --
+#endif
+        }
+
+        return false;
+    }
 
 	static void Real_INT10_TeletypeOutput(Bit8u xChar,Bit8u xAttr) {
 		Bit16u		oldax,oldbx;
 
-		oldax=reg_ax;
-		oldbx=reg_bx;
+        if (IS_PC98_ARCH) {
+            if (con_sjis.take(xChar)) {
+                BIOS_NCOLS;BIOS_NROWS;
+                Bit8u page=real_readb(BIOSMEM_SEG,BIOSMEM_CURRENT_PAGE);
+                Bit8u cur_row=CURSOR_POS_ROW(page);
+                Bit8u cur_col=CURSOR_POS_COL(page);
+                unsigned char cw = con_sjis.doublewide ? 2 : 1;
 
-		reg_ah=0xE;
-		reg_al=xChar;
-		reg_bl=xAttr;
-		CALLBACK_RunRealInt(0x10);
+                /* FIXME: I'm not sure what NEC's ANSI driver does if a doublewide character is printed at column 79 */
+                if ((cur_col+cw) > ncols) {
+                    cur_col = ncols;
+                    AdjustCursorPosition(cur_col,cur_row);
+                }
 
-		reg_ax=oldax;
-		reg_bx=oldbx;
+                /* JIS conversion to WORD value appropriate for text RAM */
+                if (con_sjis.b2 != 0) con_sjis.b1 -= 0x20;
+
+                INT10_WriteChar((con_sjis.b2 << 8) + con_sjis.b1,xAttr,0,1,true);
+
+                cur_col += cw;
+                AdjustCursorPosition(cur_col,cur_row);
+                Real_INT10_SetCursorPos(cur_row,cur_col,page);	
+            }
+        }
+        else {
+            oldax=reg_ax;
+            oldbx=reg_bx;
+
+            reg_ah=0xE;
+            reg_al=xChar;
+            reg_bl=xAttr;
+
+            CALLBACK_RunRealInt(0x10);
+
+            reg_ax=oldax;
+            reg_bx=oldbx;
+        }
 	}
 
 
@@ -111,7 +220,15 @@ private:
 		if(useattr)
 				reg_ah=0x9;
 		else	reg_ah=0x0A;
-		CALLBACK_RunRealInt(0x10);
+
+        /* FIXME: PC-98 emulation should eventually use CONIO emulation that
+         *        better emulates the actual platform. The purpose of this
+         *        hack is to allow our code to call into INT 10h without
+         *        setting up an INT 10h vector */
+        if (IS_PC98_ARCH)
+            INT10_Handler();
+        else
+            CALLBACK_RunRealInt(0x10);
 
 		reg_ax=oldax;
 		reg_bx=oldbx;
@@ -126,14 +243,20 @@ private:
 		{
 			cur_col=0;
 			cur_row++;
-			Real_INT10_TeletypeOutput('\r',0x7);
-		}
+
+            if (!IS_PC98_ARCH)
+                Real_INT10_TeletypeOutput('\r',0x7);
+        }
 		
 		//Reached the bottom?
 		if(cur_row==nrows) 
 		{
-			Real_INT10_TeletypeOutput('\n',0x7);	//Scroll up
-			cur_row--;
+            if (IS_PC98_ARCH)
+		        INT10_ScrollWindow(0,0,(Bit8u)(nrows-1),(Bit8u)(ncols-1),-1,0x07,0);
+            else
+                Real_INT10_TeletypeOutput('\n',0x7);	//Scroll up
+
+            cur_row--;
 		}
 	}
 
@@ -177,9 +300,30 @@ private:
 			} while(cur_col%8);
 			break;
 		default:
-			//* Draw the actual Character 
-			Real_WriteChar(cur_col,cur_row,page,chr,attr,useattr);
-			cur_col++;
+			//* Draw the actual Character
+            if (IS_PC98_ARCH) {
+                if (con_sjis.take(chr)) {
+                    BIOS_NCOLS;BIOS_NROWS;
+                    unsigned char cw = con_sjis.doublewide ? 2 : 1;
+
+                    /* FIXME: I'm not sure what NEC's ANSI driver does if a doublewide character is printed at column 79 */
+                    if ((cur_col+cw) > ncols) {
+                        cur_col = ncols;
+                        AdjustCursorPosition(cur_col,cur_row);
+                    }
+
+                    /* JIS conversion to WORD value appropriate for text RAM */
+                    if (con_sjis.b2 != 0) con_sjis.b1 -= 0x20;
+
+                    INT10_WriteChar((con_sjis.b2 << 8) + con_sjis.b1,attr,0,1,true);
+
+                    cur_col += cw;
+                }
+            }
+            else {
+                Real_WriteChar(cur_col,cur_row,page,chr,attr,useattr);
+                cur_col++;
+            }
 		}
 		
 		AdjustCursorPosition(cur_col,cur_row);
@@ -187,7 +331,40 @@ private:
 	}//void Real_INT10_TeletypeOutputAttr(Bit8u chr,Bit8u attr,bool useattr) 
 };
 
-
+// NEC-PC98 keyboard input notes
+//
+// on a system with KKCFUNC.SYS, NECAIK1.SYS, NECAIK2.SYS, NECAI.SYS loaded
+//
+// Key      Normal      Shift       CTRL
+// -------------------------------------
+// ESC      0x1B        0x1B        0x1B
+// TAB      0x09        0x09        0x09
+// F1       0x1B 0x53   <shortcut>  --
+// F2       0x1B 0x54   <shortcut>  --
+// F3       0x1B 0x55   <shortcut>  --
+// F4       0x1B 0x56   <shortcut>  Toggles 'g'
+// F5       0x1B 0x57   <shortcut>  --
+// F6       0x1B 0x45   <shortcut>  Toggle 20/25-line text mode
+// F7       0x1B 0x4A   <shortcut>  Toggle function row (C1/CU/etc, shortcuts, or off)
+// F8       0x1B 0x50   <shortcut>  Clear screen, home cursor
+// F9       0x1B 0x51   <shortcut>  --
+// F10      0x1B 0x5A   <shortcut>  --
+// INS      0x1B 0x50   0x1B 0x50   0x1B 0x50
+// DEL      0x1B 0x44   0x1B 0x44   0x1B 0x44
+// ROLL UP  --          --          --
+// POLL DOWN--          --          --
+// COPY     --          --          --
+// HOME/CLR 0x1A        0x1E        --
+// HELP     --          --          --
+// UP ARROW 0x0B        0x0B        0x0B
+// LF ARROW 0x08        0x08        0x08
+// RT ARROW 0x0C        0x0C        0x0C
+// DN ARROW 0x0A        0x0A        0x0A
+// VF1      --          --          --
+// VF2      --          --          --
+// VF3      --          --          --
+// VF4      --          --          --
+// VF5      --          --          --
 
 bool device_CON::Read(Bit8u * data,Bit16u * size) {
 	Bit16u oldax=reg_ax;
@@ -199,14 +376,25 @@ bool device_CON::Read(Bit8u * data,Bit16u * size) {
 		readcache=0;
 	}
 	while (*size>count) {
-	/*	while (true) {
-			reg_ah=0x1; // check for keystroke
-			CALLBACK_RunRealInt(0x16);
-			if (!GETFLAG(ZF)) break;
-			CALLBACK_RunRealInt(0x28);
-		}; */ //DOSIdle
+        if (dev_con_pos < dev_con_max) {
+            data[count++] = dev_con_readbuf[dev_con_pos++];
+            continue;
+        }
+
 		reg_ah=(IS_EGAVGA_ARCH)?0x10:0x0;
-		CALLBACK_RunRealInt(0x16);
+
+        /* FIXME: PC-98 emulation should eventually use CONIO emulation that
+         *        better emulates the actual platform. The purpose of this
+         *        hack is to allow our code to call into INT 16h without
+         *        setting up an INT 16h vector */
+        if (IS_PC98_ARCH)
+            INT16_Handler_Wrap();
+        else
+            CALLBACK_RunRealInt(0x16);
+
+        /* hack for DOSKEY emulation */
+        last_int16_code = reg_ax;
+
 		switch(reg_al) {
 		case 13:
 			data[count++]=0x0D;
@@ -239,9 +427,18 @@ bool device_CON::Read(Bit8u * data,Bit16u * size) {
 			}
 			break;
 		case 0: /* Extended keys in the int 16 0x0 case */
-			data[count++]=reg_al;
-			if (*size>count) data[count++]=reg_ah;
-			else readcache=reg_ah;
+            if (IS_PC98_ARCH) {
+                /* PC-98 does NOT return scan code, but instead returns nothing or
+                 * control/escape code */
+                CommonPC98ExtScanConversionToReadBuf(reg_ah);
+            }
+            else {
+                /* IBM PC/XT/AT signals extended code by entering AL, AH.
+                 * Arrow keys for example become 0x00 0x48, 0x00 0x50, etc. */
+    			data[count++]=reg_al;
+	    		if (*size>count) data[count++]=reg_ah;
+		    	else readcache=reg_ah;
+            }
 			break;
 		default:
 			data[count++]=reg_al;
@@ -257,261 +454,305 @@ bool device_CON::Read(Bit8u * data,Bit16u * size) {
 	return true;
 }
 
+bool log_dev_con = false;
+std::string log_dev_con_str;
 
 bool device_CON::Write(Bit8u * data,Bit16u * size) {
-	Bit16u count=0;
-	Bitu i;
-	Bit8u col,row;
-	Bit8u tempdata;
-	INT10_SetCurMode();
-	while (*size>count) {
-		if (!ansi.esc){
-			if(data[count]=='\033') {
-				/*clear the datastructure */
-				ClearAnsi();
-				/* start the sequence */
-				ansi.esc=true;
-				count++;
-				continue;
-			} else { 
-				/* Some sort of "hack" now that '\n' doesn't set col to 0 (int10_char.cpp old chessgame) */
-				if((data[count] == '\n') && (lastwrite != '\r')) Real_INT10_TeletypeOutputAttr('\r',ansi.attr,ansi.enabled);
- 				/* pass attribute only if ansi is enabled */
-				Real_INT10_TeletypeOutputAttr(data[count],ansi.enabled?ansi.attr:7,true);
-				lastwrite = data[count++];
-				continue;
-		}
-	}
+    Bit16u count=0;
+    Bitu i;
+    Bit8u col,row;
+    Bit8u tempdata;
+    INT10_SetCurMode();
+    while (*size>count) {
+        if (log_dev_con) {
+            if (log_dev_con_str.size() >= 255 || data[count] == '\n') {
+                LOG_MSG("DOS CON: %s",log_dev_con_str.c_str());
+                log_dev_con_str.clear();
+            }
 
-	if(!ansi.sci){
-            
-		switch(data[count]){
-		case '[': 
-			ansi.sci=true;
-			break;
-		case '7': /* save cursor pos + attr */
-		case '8': /* restore this  (Wonder if this is actually used) */
-		case 'D':/* scrolling DOWN*/
-		case 'M':/* scrolling UP*/ 
-		default:
-			LOG(LOG_IOCTL,LOG_NORMAL)("ANSI: unknown char %c after a esc",data[count]); /*prob () */
-			ClearAnsi();
-			break;
-		}
-		count++;
-		continue;
-	}
-	/*ansi.esc and ansi.sci are true */
-	Bit8u page = real_readb(BIOSMEM_SEG,BIOSMEM_CURRENT_PAGE);
-	switch(data[count]){
-		case '0':
-		case '1':
-		case '2':
-		case '3':
-		case '4':
-		case '5':
-		case '6':
-		case '7':
-		case '8':
-		case '9':
-			ansi.data[ansi.numberofarg]=10*ansi.data[ansi.numberofarg]+(data[count]-'0');
-			break;
-		case ';': /* till a max of NUMBER_ANSI_DATA */
-			ansi.numberofarg++;
-			break;
-		case 'm':               /* SGR */
-			for(i=0;i<=ansi.numberofarg;i++){ 
-				ansi.enabled=true;
-				switch(ansi.data[i]){
-				case 0: /* normal */
-					ansi.attr=0x07;//Real ansi does this as well. (should do current defaults)
-					ansi.enabled=false;
-					break;
-				case 1: /* bold mode on*/
-					ansi.attr|=0x08;
-					break;
-				case 4: /* underline */
-					LOG(LOG_IOCTL,LOG_NORMAL)("ANSI:no support for underline yet");
-					break;
-				case 5: /* blinking */
-					ansi.attr|=0x80;
-					break;
-				case 7: /* reverse */
-					ansi.attr=0x70;//Just like real ansi. (should do use current colors reversed)
-					break;
-				case 30: /* fg color black */
-					ansi.attr&=0xf8;
-					ansi.attr|=0x0;
-					break;
-				case 31:  /* fg color red */
-					ansi.attr&=0xf8;
-					ansi.attr|=0x4;
-					break;
-				case 32:  /* fg color green */
-					ansi.attr&=0xf8;
-					ansi.attr|=0x2;
-					break;
-				case 33: /* fg color yellow */
-					ansi.attr&=0xf8;
-					ansi.attr|=0x6;
-					break;
-				case 34: /* fg color blue */
-					ansi.attr&=0xf8;
-					ansi.attr|=0x1;
-					break;
-				case 35: /* fg color magenta */
-					ansi.attr&=0xf8;
-					ansi.attr|=0x5;
-					break;
-				case 36: /* fg color cyan */
-					ansi.attr&=0xf8;
-					ansi.attr|=0x3;
-					break;
-				case 37: /* fg color white */
-					ansi.attr&=0xf8;
-					ansi.attr|=0x7;
-					break;
-				case 40:
-					ansi.attr&=0x8f;
-					ansi.attr|=0x0;
-					break;
-				case 41:
-					ansi.attr&=0x8f;
-					ansi.attr|=0x40;
-					break;
-				case 42:
-					ansi.attr&=0x8f;
-					ansi.attr|=0x20;
-					break;
-				case 43:
-					ansi.attr&=0x8f;
-					ansi.attr|=0x60;
-					break;
-				case 44:
-					ansi.attr&=0x8f;
-					ansi.attr|=0x10;
-					break;
-				case 45:
-					ansi.attr&=0x8f;
-					ansi.attr|=0x50;
-					break;
-				case 46:
-					ansi.attr&=0x8f;
-					ansi.attr|=0x30;
-					break;	
-				case 47:
-					ansi.attr&=0x8f;
-					ansi.attr|=0x70;
-					break;
-				default:
-					break;
-				}
-			}
-			ClearAnsi();
-			break;
-		case 'f':
-		case 'H':/* Cursor Pos*/
-			if(!ansi.warned) { //Inform the debugger that ansi is used.
-				ansi.warned = true;
-				LOG(LOG_IOCTL,LOG_WARN)("ANSI SEQUENCES USED");
-			}
-			/* Turn them into positions that are on the screen */
-			if(ansi.data[0] == 0) ansi.data[0] = 1;
-			if(ansi.data[1] == 0) ansi.data[1] = 1;
-			if(ansi.data[0] > ansi.nrows) ansi.data[0] = (Bit8u)ansi.nrows;
-			if(ansi.data[1] > ansi.ncols) ansi.data[1] = (Bit8u)ansi.ncols;
-			Real_INT10_SetCursorPos(--(ansi.data[0]),--(ansi.data[1]),page); /*ansi=1 based, int10 is 0 based */
-			ClearAnsi();
-			break;
-			/* cursor up down and forward and backward only change the row or the col not both */
-		case 'A': /* cursor up*/
-			col=CURSOR_POS_COL(page) ;
-			row=CURSOR_POS_ROW(page) ;
-			tempdata = (ansi.data[0]? ansi.data[0] : 1);
-			if(tempdata > row) { row=0; } 
-			else { row-=tempdata;}
-			Real_INT10_SetCursorPos(row,col,page);
-			ClearAnsi();
-			break;
-		case 'B': /*cursor Down */
-			col=CURSOR_POS_COL(page) ;
-			row=CURSOR_POS_ROW(page) ;
-			tempdata = (ansi.data[0]? ansi.data[0] : 1);
-			if(tempdata + static_cast<Bitu>(row) >= ansi.nrows)
-				{ row = ansi.nrows - 1;}
-			else	{ row += tempdata; }
-			Real_INT10_SetCursorPos(row,col,page);
-			ClearAnsi();
-			break;
-		case 'C': /*cursor forward */
-			col=CURSOR_POS_COL(page);
-			row=CURSOR_POS_ROW(page);
-			tempdata=(ansi.data[0]? ansi.data[0] : 1);
-			if(tempdata + static_cast<Bitu>(col) >= ansi.ncols) 
-				{ col = ansi.ncols - 1;} 
-			else	{ col += tempdata;}
-			Real_INT10_SetCursorPos(row,col,page);
-			ClearAnsi();
-			break;
-		case 'D': /*Cursor Backward  */
-			col=CURSOR_POS_COL(page);
-			row=CURSOR_POS_ROW(page);
-			tempdata=(ansi.data[0]? ansi.data[0] : 1);
-			if(tempdata > col) {col = 0;}
-			else { col -= tempdata;}
-			Real_INT10_SetCursorPos(row,col,page);
-			ClearAnsi();
-			break;
-		case 'J': /*erase screen and move cursor home*/
-			if(ansi.data[0]==0) ansi.data[0]=2;
-			if(ansi.data[0]!=2) {/* every version behaves like type 2 */
-				LOG(LOG_IOCTL,LOG_NORMAL)("ANSI: esc[%dJ called : not supported handling as 2",ansi.data[0]);
-			}
-			INT10_ScrollWindow(0,0,255,255,0,ansi.attr,page);
-			ClearAnsi();
-			Real_INT10_SetCursorPos(0,0,page);
-			break;
-		case 'h': /* SET   MODE (if code =7 enable linewrap) */
-		case 'I': /* RESET MODE */
-			LOG(LOG_IOCTL,LOG_NORMAL)("ANSI: set/reset mode called(not supported)");
-			ClearAnsi();
-			break;
-		case 'u': /* Restore Cursor Pos */
-			Real_INT10_SetCursorPos(ansi.saverow,ansi.savecol,page);
-			ClearAnsi();
-			break;
-		case 's': /* SAVE CURSOR POS */
-			ansi.savecol=CURSOR_POS_COL(page);
-			ansi.saverow=CURSOR_POS_ROW(page);
-			ClearAnsi();
-			break;
-		case 'K': /* erase till end of line (don't touch cursor) */
-			col = CURSOR_POS_COL(page);
-			row = CURSOR_POS_ROW(page);
-			INT10_WriteChar(' ',ansi.attr,page,ansi.ncols-col,true); //Real_WriteChar(ansi.ncols-col,row,page,' ',ansi.attr,true);
+            if (data[count] != '\n' && data[count] != '\r')
+                log_dev_con_str += (char)data[count];
+        }
 
-			//for(i = col;i<(Bitu) ansi.ncols; i++) INT10_TeletypeOutputAttr(' ',ansi.attr,true);
-			Real_INT10_SetCursorPos(row,col,page);
-			ClearAnsi();
-			break;
-		case 'M': /* delete line (NANSI) */
-			col = CURSOR_POS_COL(page);
-			row = CURSOR_POS_ROW(page);
-			INT10_ScrollWindow(row,0,ansi.nrows-1,ansi.ncols-1,ansi.data[0]? -ansi.data[0] : -1,ansi.attr,0xFF);
-			ClearAnsi();
-			break;
-		case 'l':/* (if code =7) disable linewrap */
-		case 'p':/* reassign keys (needs strings) */
-		case 'i':/* printer stuff */
-		default:
-			LOG(LOG_IOCTL,LOG_NORMAL)("ANSI: unhandled char %c in esc[",data[count]);
-			ClearAnsi();
-			break;
-		}
-		count++;
-	}
-	*size=count;
-	return true;
+        if (!ansi.esc){
+            if(data[count]=='\033') {
+                /*clear the datastructure */
+                ClearAnsi();
+                /* start the sequence */
+                ansi.esc=true;
+                count++;
+                continue;
+            } else { 
+                /* Some sort of "hack" now that '\n' doesn't set col to 0 (int10_char.cpp old chessgame) */
+                if((data[count] == '\n') && (lastwrite != '\r')) Real_INT10_TeletypeOutputAttr('\r',ansi.attr,ansi.enabled);
+                /* use ansi attribute if ansi is enabled, otherwise use DOS default attribute*/
+                Real_INT10_TeletypeOutputAttr(data[count],ansi.enabled?ansi.attr:7,true);
+                lastwrite = data[count++];
+                continue;
+            }
+        }
+
+        if(!ansi.sci){
+
+            switch(data[count]){
+                case '[': 
+                    ansi.sci=true;
+                    break;
+                case '7': /* save cursor pos + attr */
+                case '8': /* restore this  (Wonder if this is actually used) */
+                case 'D':/* scrolling DOWN*/
+                case 'M':/* scrolling UP*/ 
+                default:
+                    LOG(LOG_IOCTL,LOG_NORMAL)("ANSI: unknown char %c after a esc",data[count]); /*prob () */
+                    ClearAnsi();
+                    break;
+            }
+            count++;
+            continue;
+        }
+        /*ansi.esc and ansi.sci are true */
+        Bit8u page = real_readb(BIOSMEM_SEG,BIOSMEM_CURRENT_PAGE);
+        if (isdigit(data[count])) {
+            assert(ansi.numberofarg < NUMBER_ANSI_DATA);
+            ansi.data[ansi.numberofarg]=10*ansi.data[ansi.numberofarg]+(data[count]-'0');
+        }
+        else if (data[count] == ';') {
+            if ((ansi.numberofarg+1) < NUMBER_ANSI_DATA)
+                ansi.numberofarg++;
+        }
+        else if (ansi.pc98rab) {
+            assert(IS_PC98_ARCH);
+
+            switch(data[count]){
+                case 'h': /* SET   MODE (if code =7 enable linewrap) */
+                case 'l': /* RESET MODE */
+                    switch (ansi.data[0]) {
+                        case 1: // show/hide function key row
+                            void update_pc98_function_row(bool enable);
+                            update_pc98_function_row(data[count] == 'l');
+                            break;
+                        case 5: // show/hide cursor
+                            void PC98_show_cursor(bool show);
+                            PC98_show_cursor(data[count] == 'l');
+                            break;
+                        default:
+                            LOG(LOG_IOCTL,LOG_NORMAL)("ANSI: unhandled esc [ > %d %c",ansi.data[0],data[count]);
+                            break;
+                    };
+
+                    ClearAnsi();
+                    break;
+                default:
+                    LOG(LOG_IOCTL,LOG_NORMAL)("ANSI: unhandled char %c in esc [ >",data[count]);
+                    ClearAnsi();
+                    break;
+            }
+        }
+        else {
+            switch(data[count]){
+                case 'm':               /* SGR */
+                    for(i=0;i<=ansi.numberofarg;i++){ 
+                        ansi.enabled=true;
+                        switch(ansi.data[i]){
+                            case 0: /* normal */
+                                ansi.attr=0x07;//Real ansi does this as well. (should do current defaults)
+                                ansi.enabled=false;
+                                break;
+                            case 1: /* bold mode on*/
+                                ansi.attr|=0x08;
+                                break;
+                            case 4: /* underline */
+                                LOG(LOG_IOCTL,LOG_NORMAL)("ANSI:no support for underline yet");
+                                break;
+                            case 5: /* blinking */
+                                ansi.attr|=0x80;
+                                break;
+                            case 7: /* reverse */
+                                ansi.attr=0x70;//Just like real ansi. (should do use current colors reversed)
+                                break;
+                            case 30: /* fg color black */
+                                ansi.attr&=0xf8;
+                                ansi.attr|=0x0;
+                                break;
+                            case 31:  /* fg color red */
+                                ansi.attr&=0xf8;
+                                ansi.attr|=0x4;
+                                break;
+                            case 32:  /* fg color green */
+                                ansi.attr&=0xf8;
+                                ansi.attr|=0x2;
+                                break;
+                            case 33: /* fg color yellow */
+                                ansi.attr&=0xf8;
+                                ansi.attr|=0x6;
+                                break;
+                            case 34: /* fg color blue */
+                                ansi.attr&=0xf8;
+                                ansi.attr|=0x1;
+                                break;
+                            case 35: /* fg color magenta */
+                                ansi.attr&=0xf8;
+                                ansi.attr|=0x5;
+                                break;
+                            case 36: /* fg color cyan */
+                                ansi.attr&=0xf8;
+                                ansi.attr|=0x3;
+                                break;
+                            case 37: /* fg color white */
+                                ansi.attr&=0xf8;
+                                ansi.attr|=0x7;
+                                break;
+                            case 40:
+                                ansi.attr&=0x8f;
+                                ansi.attr|=0x0;
+                                break;
+                            case 41:
+                                ansi.attr&=0x8f;
+                                ansi.attr|=0x40;
+                                break;
+                            case 42:
+                                ansi.attr&=0x8f;
+                                ansi.attr|=0x20;
+                                break;
+                            case 43:
+                                ansi.attr&=0x8f;
+                                ansi.attr|=0x60;
+                                break;
+                            case 44:
+                                ansi.attr&=0x8f;
+                                ansi.attr|=0x10;
+                                break;
+                            case 45:
+                                ansi.attr&=0x8f;
+                                ansi.attr|=0x50;
+                                break;
+                            case 46:
+                                ansi.attr&=0x8f;
+                                ansi.attr|=0x30;
+                                break;	
+                            case 47:
+                                ansi.attr&=0x8f;
+                                ansi.attr|=0x70;
+                                break;
+                            default:
+                                break;
+                        }
+                    }
+                    ClearAnsi();
+                    break;
+                case 'f':
+                case 'H':/* Cursor Pos*/
+                    if(!ansi.warned) { //Inform the debugger that ansi is used.
+                        ansi.warned = true;
+                        LOG(LOG_IOCTL,LOG_WARN)("ANSI SEQUENCES USED");
+                    }
+                    /* Turn them into positions that are on the screen */
+                    if(ansi.data[0] == 0) ansi.data[0] = 1;
+                    if(ansi.data[1] == 0) ansi.data[1] = 1;
+                    if(ansi.data[0] > ansi.nrows) ansi.data[0] = (Bit8u)ansi.nrows;
+                    if(ansi.data[1] > ansi.ncols) ansi.data[1] = (Bit8u)ansi.ncols;
+                    Real_INT10_SetCursorPos(--(ansi.data[0]),--(ansi.data[1]),page); /*ansi=1 based, int10 is 0 based */
+                    ClearAnsi();
+                    break;
+                    /* cursor up down and forward and backward only change the row or the col not both */
+                case 'A': /* cursor up*/
+                    col=CURSOR_POS_COL(page) ;
+                    row=CURSOR_POS_ROW(page) ;
+                    tempdata = (ansi.data[0]? ansi.data[0] : 1);
+                    if(tempdata > row) { row=0; } 
+                    else { row-=tempdata;}
+                    Real_INT10_SetCursorPos(row,col,page);
+                    ClearAnsi();
+                    break;
+                case 'B': /*cursor Down */
+                    col=CURSOR_POS_COL(page) ;
+                    row=CURSOR_POS_ROW(page) ;
+                    tempdata = (ansi.data[0]? ansi.data[0] : 1);
+                    if(tempdata + static_cast<Bitu>(row) >= ansi.nrows)
+                    { row = ansi.nrows - 1;}
+                    else	{ row += tempdata; }
+                    Real_INT10_SetCursorPos(row,col,page);
+                    ClearAnsi();
+                    break;
+                case 'C': /*cursor forward */
+                    col=CURSOR_POS_COL(page);
+                    row=CURSOR_POS_ROW(page);
+                    tempdata=(ansi.data[0]? ansi.data[0] : 1);
+                    if(tempdata + static_cast<Bitu>(col) >= ansi.ncols) 
+                    { col = ansi.ncols - 1;} 
+                    else	{ col += tempdata;}
+                    Real_INT10_SetCursorPos(row,col,page);
+                    ClearAnsi();
+                    break;
+                case 'D': /*Cursor Backward  */
+                    col=CURSOR_POS_COL(page);
+                    row=CURSOR_POS_ROW(page);
+                    tempdata=(ansi.data[0]? ansi.data[0] : 1);
+                    if(tempdata > col) {col = 0;}
+                    else { col -= tempdata;}
+                    Real_INT10_SetCursorPos(row,col,page);
+                    ClearAnsi();
+                    break;
+                case 'J': /*erase screen and move cursor home*/
+                    if(ansi.data[0]==0) ansi.data[0]=2;
+                    if(ansi.data[0]!=2) {/* every version behaves like type 2 */
+                        LOG(LOG_IOCTL,LOG_NORMAL)("ANSI: esc[%dJ called : not supported handling as 2",ansi.data[0]);
+                    }
+                    INT10_ScrollWindow(0,0,255,255,0,ansi.attr,page);
+                    ClearAnsi();
+                    Real_INT10_SetCursorPos(0,0,page);
+                    break;
+                case 'h': /* SET   MODE (if code =7 enable linewrap) */
+                case 'I': /* RESET MODE */
+                    LOG(LOG_IOCTL,LOG_NORMAL)("ANSI: set/reset mode called(not supported)");
+                    ClearAnsi();
+                    break;
+                case 'u': /* Restore Cursor Pos */
+                    Real_INT10_SetCursorPos(ansi.saverow,ansi.savecol,page);
+                    ClearAnsi();
+                    break;
+                case 's': /* SAVE CURSOR POS */
+                    ansi.savecol=CURSOR_POS_COL(page);
+                    ansi.saverow=CURSOR_POS_ROW(page);
+                    ClearAnsi();
+                    break;
+                case 'K': /* erase till end of line (don't touch cursor) */
+                    col = CURSOR_POS_COL(page);
+                    row = CURSOR_POS_ROW(page);
+                    INT10_WriteChar(' ',ansi.attr,page,ansi.ncols-col,true); //Real_WriteChar(ansi.ncols-col,row,page,' ',ansi.attr,true);
+
+                    //for(i = col;i<(Bitu) ansi.ncols; i++) INT10_TeletypeOutputAttr(' ',ansi.attr,true);
+                    Real_INT10_SetCursorPos(row,col,page);
+                    ClearAnsi();
+                    break;
+                case 'M': /* delete line (NANSI) */
+                    col = CURSOR_POS_COL(page);
+                    row = CURSOR_POS_ROW(page);
+                    INT10_ScrollWindow(row,0,ansi.nrows-1,ansi.ncols-1,ansi.data[0]? -ansi.data[0] : -1,ansi.attr,0xFF);
+                    ClearAnsi();
+                    break;
+                case '>':/* proprietary NEC PC-98 MS-DOS codes (??) */
+                    if (IS_PC98_ARCH) {
+                        ansi.pc98rab = true;
+                    }
+                    else {
+                        LOG(LOG_IOCTL,LOG_NORMAL)("ANSI: ESC [ > not supported outside PC-98 mode");
+                        ClearAnsi();
+                    }
+                    break;
+                case 'l':/* (if code =7) disable linewrap */
+                case 'p':/* reassign keys (needs strings) */
+                case 'i':/* printer stuff */
+                default:
+                    LOG(LOG_IOCTL,LOG_NORMAL)("ANSI: unhandled char %c in esc[",data[count]);
+                    ClearAnsi();
+                    break;
+            }
+        }
+        count++;
+    }
+    *size=count;
+    return true;
 }
 
 bool device_CON::Seek(Bit32u * pos,Bit32u type) {
@@ -524,10 +765,10 @@ bool device_CON::Close() {
 	return true;
 }
 
-Bit16u device_CON::GetInformation(void) {
 extern bool dos_con_use_int16_to_detect_input;
 
-	if (dos_con_use_int16_to_detect_input) {
+Bit16u device_CON::GetInformation(void) {
+	if (dos_con_use_int16_to_detect_input || IS_PC98_ARCH) {
 		Bit16u ret = 0x80D3; /* No Key Available */
 
 		/* DOSBox-X behavior: Use INT 16h AH=0x11 Query keyboard status/preview key.
@@ -548,15 +789,46 @@ extern bool dos_con_use_int16_to_detect_input;
 		 * Since Scandisk is using INT 21h AH=0x0B to query STDIN during this time,
 		 * this implementation is a good "halfway" compromise in that this call
 		 * will trigger the INT 16h AH=0x11 hook it relies on. */
-		if (readcache) return 0x8093; /* key available */
+		if (readcache || dev_con_pos < dev_con_max) return 0x8093; /* key available */
 
 		Bitu saved_ax = reg_ax;
 
 		reg_ah = (IS_EGAVGA_ARCH)?0x11:0x1; // check for keystroke
-		CALLBACK_RunRealInt(0x16);
-		if (!GETFLAG(ZF)) { /* key is present, waiting to be returned on AH=0x10 or AH=0x00 */
-			ret = 0x8093; /* Key Available */
-		}
+
+        /* FIXME: PC-98 emulation should eventually use CONIO emulation that
+         *        better emulates the actual platform. The purpose of this
+         *        hack is to allow our code to call into INT 16h without
+         *        setting up an INT 16h vector */
+        if (IS_PC98_ARCH)
+            INT16_Handler_Wrap();
+        else
+            CALLBACK_RunRealInt(0x16);
+
+        if (!GETFLAG(ZF)) { /* key is present, waiting to be returned on AH=0x10 or AH=0x00 */
+            if (IS_PC98_ARCH && reg_al == 0) {
+                /* some scan codes are ignored by CON, and wouldn't read anything.
+                 * while we're at it, take the scan code and convert it into ANSI here
+                 * so that Read() returns it immediately instead of doing this conversion itself.
+                 * This way we never block when we SAID a key was available that gets ignored. */
+                if (CommonPC98ExtScanConversionToReadBuf(reg_ah))
+                    ret = 0x8093; /* Key Available */
+                else
+                    ret = 0x80D3; /* No Key Available */
+
+                /* need to consume the key. if it generated anything it will be returned to Read()
+                 * through dev_con_readbuf[] */
+                reg_ah=0x0;
+
+                /* FIXME: PC-98 emulation should eventually use CONIO emulation that
+                 *        better emulates the actual platform. The purpose of this
+                 *        hack is to allow our code to call into INT 16h without
+                 *        setting up an INT 16h vector */
+                INT16_Handler_Wrap();
+            }
+            else {
+                ret = 0x8093; /* Key Available */
+            }
+        }
 
 		reg_ax = saved_ax;
 		return ret;
@@ -596,50 +868,9 @@ device_CON::device_CON() {
 
 void device_CON::ClearAnsi(void){
 	for(Bit8u i=0; i<NUMBER_ANSI_DATA;i++) ansi.data[i]=0;
+    ansi.pc98rab=false;
 	ansi.esc=false;
 	ansi.sci=false;
 	ansi.numberofarg=0;
 }
 
-
-// save state support
-void device_CON::SaveState( std::ostream& stream )
-{
-	// - pure data
-	WRITE_POD( &readcache, readcache );
-	WRITE_POD( &lastwrite, lastwrite );
-
-	WRITE_POD( &ansi, ansi );
-}
-
-
-void device_CON::LoadState( std::istream& stream )
-{
-	// - pure data
-	READ_POD( &readcache, readcache );
-	READ_POD( &lastwrite, lastwrite );
-
-	READ_POD( &ansi, ansi );
-}
-
-
-
-/*
-ykhwong svn-daum 2012-05-21
-
-	// - pure data
-	Bit8u readcache;
-	Bit8u lastwrite;
-	struct ansi
-		bool esc;
-		bool sci;
-		bool enabled;
-		Bit8u attr;
-		Bit8u data[NUMBER_ANSI_DATA];
-		Bit8u numberofarg;
-		Bit16u nrows;
-		Bit16u ncols;
-		Bit8s savecol;
-		Bit8s saverow;
-		bool warned;
-*/

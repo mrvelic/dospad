@@ -22,14 +22,17 @@
 
 #include "SDL.h"
 #include "SDL_opengl.h"
-#include "voodoo_types.h"
+
 
 /* opengl extensions */
-//#ifdef WIN32
+#ifdef WIN32
 extern PFNGLACTIVETEXTUREARBPROC glActiveTextureARB;
 extern PFNGLMULTITEXCOORD4FARBPROC glMultiTexCoord4fARB;
 extern PFNGLMULTITEXCOORD4FVARBPROC glMultiTexCoord4fvARB;
-//#endif
+# define glMultiTexCoord4fv glMultiTexCoord4fvARB
+# define glActiveTexture glActiveTextureARB
+#endif
+
 extern PFNGLCREATESHADEROBJECTARBPROC glCreateShaderObjectARB;
 extern PFNGLSHADERSOURCEARBPROC glShaderSourceARB;
 extern PFNGLCOMPILESHADERARBPROC glCompileShaderARB;
@@ -47,8 +50,8 @@ extern PFNGLDETACHOBJECTARBPROC glDetachObjectARB;
 extern PFNGLDELETEOBJECTARBPROC glDeleteObjectARB;
 extern PFNGLGETOBJECTPARAMETERIVARBPROC glGetObjectParameterivARB;
 extern PFNGLGETINFOLOGARBPROC glGetInfoLogARB;
-extern PFNGLBLENDFUNCSEPARATEEXTPROC glBlendFuncSeparateEXT;
-extern PFNGLGENERATEMIPMAPEXTPROC glGenerateMipmapEXT;
+extern PFNGLBLENDFUNCSEPARATEEXTPROC glBlendFuncSeparateExt;
+extern PFNGLGENERATEMIPMAPEXTPROC glGenerateMipmapExt;
 extern PFNGLGETATTRIBLOCATIONARBPROC glGetAttribLocationARB;
 extern PFNGLVERTEXATTRIB1FARBPROC glVertexAttrib1fARB;
 

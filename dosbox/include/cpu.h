@@ -41,11 +41,15 @@
 
 
 #define CPU_ARCHTYPE_MIXED			0xff
+#define CPU_ARCHTYPE_8086			0x05
+#define CPU_ARCHTYPE_80186			0x15
+#define CPU_ARCHTYPE_286			0x25
 #define CPU_ARCHTYPE_386			0x35
 #define CPU_ARCHTYPE_486OLD			0x40
 #define CPU_ARCHTYPE_486NEW			0x45
 #define CPU_ARCHTYPE_PENTIUM		0x50
 #define CPU_ARCHTYPE_P55CSLOW		0x55
+#define CPU_ARCHTYPE_PPROSLOW		0x60
 
 /* CPU Cycle Timing */
 extern Bit32s CPU_Cycles;
@@ -61,6 +65,8 @@ extern Bitu CPU_AutoDetermineMode;
 extern Bitu CPU_CyclesCur;
 extern Bit32s CPU_CyclesSet;
 extern char core_mode[16];
+
+extern bool enable_weitek;
 
 extern Bitu CPU_ArchitectureType;
 
@@ -81,6 +87,12 @@ Bits CPU_Core_Dynrec_Run(void);
 Bits CPU_Core_Dynrec_Trap_Run(void);
 Bits CPU_Core_Prefetch_Run(void);
 Bits CPU_Core_Prefetch_Trap_Run(void);
+
+Bits CPU_Core286_Normal_Run(void);
+Bits CPU_Core286_Normal_Trap_Run(void);
+
+Bits CPU_Core8086_Normal_Run(void);
+Bits CPU_Core8086_Normal_Trap_Run(void);
 
 void CPU_Enable_SkipAutoAdjust(void);
 void CPU_Disable_SkipAutoAdjust(void);
@@ -151,6 +163,8 @@ extern bool CPU_NMI_gate;
 extern bool CPU_NMI_active;
 extern bool CPU_NMI_pending;
 
+extern bool do_seg_limits;
+
 void CPU_Interrupt(Bitu num,Bitu type,Bitu oldeip);
 void CPU_Check_NMI();
 void CPU_Raise_NMI();
@@ -181,6 +195,7 @@ void CPU_SetFlags(Bitu word,Bitu mask);
 
 
 #define EXCEPTION_UD			6
+#define EXCEPTION_DF                    8
 #define EXCEPTION_TS			10
 #define EXCEPTION_NP			11
 #define EXCEPTION_SS			12
@@ -346,6 +361,32 @@ public:
 	PhysPt GetBase (void) { 
 		return (saved.seg.base_24_31<<24) | (saved.seg.base_16_23<<16) | saved.seg.base_0_15; 
 	}
+	bool GetExpandDown (void) {
+#if 0
+	Bit32u limit_0_15	:16;
+	Bit32u base_0_15	:16;
+	Bit32u base_16_23	:8;
+	Bit32u type			:5;
+	Bit32u dpl			:2;
+	Bit32u p			:1;
+	Bit32u limit_16_19	:4;
+	Bit32u avl			:1;
+	Bit32u r			:1;
+	Bit32u big			:1;
+	Bit32u g			:1;
+	Bit32u base_24_31	:8;
+#endif
+		if (!(saved.seg.type & 0x10)) /* must be storage type descriptor */
+			return false;
+
+		/* type: 1 0 E W A for data */
+		/* type: 1 1 C R A for code */
+		if (saved.seg.type & 0x08)
+			return false;
+
+		/* it's data. return the 'E' bit */
+		return (saved.seg.type & 4) != 0;
+	}
 	Bitu GetLimit (void) {
 		Bitu limit = (saved.seg.limit_16_19<<16) | saved.seg.limit_0_15;
 		if (saved.seg.g)	return (limit<<12) | 0xFFF;
@@ -391,8 +432,6 @@ public:
 		return true;
 	}
 
-	virtual void SaveState( std::ostream& stream );
-	virtual void LoadState( std::istream& stream );
 protected:
 	PhysPt table_base;
 	Bitu table_limit;
@@ -444,8 +483,6 @@ public:
 		return true;
 	}
 
-	virtual void SaveState( std::ostream& stream );
-	virtual void LoadState( std::istream& stream );
 private:
 	PhysPt ldt_base;
 	Bitu ldt_limit;

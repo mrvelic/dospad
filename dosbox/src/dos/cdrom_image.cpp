@@ -16,7 +16,6 @@
  *  Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  */
 
-
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -29,6 +28,7 @@
 #include "cdrom.h"
 #include "drives.h"
 #include "support.h"
+#include "control.h"
 #include "setup.h"
 
 #if !defined(WIN32)
@@ -67,50 +67,6 @@ int CDROM_Interface_Image::BinaryFile::getLength()
 	if (file->fail()) return -1;
 	return length;
 }
-
-#if defined(C_SDL_SOUND)
-CDROM_Interface_Image::AudioFile::AudioFile(const char *filename, bool &error)
-{
-	Sound_AudioInfo desired = {AUDIO_S16, 2, 44100};
-	sample = Sound_NewSampleFromFile(filename, &desired, RAW_SECTOR_SIZE);
-	lastCount = RAW_SECTOR_SIZE;
-	lastSeek = 0;
-	error = (sample == NULL);
-}
-
-CDROM_Interface_Image::AudioFile::~AudioFile()
-{
-	Sound_FreeSample(sample);
-}
-
-bool CDROM_Interface_Image::AudioFile::read(Bit8u *buffer, int seek, int count)
-{
-	if (lastCount != count) {
-		int success = Sound_SetBufferSize(sample, count);
-		if (!success) return false;
-	}
-	if (lastSeek != (seek - count)) {
-		int success = Sound_Seek(sample, (int)((double)(seek) / 176.4f));
-		if (!success) return false;
-	}
-	lastSeek = seek;
-	int bytes = Sound_Decode(sample);
-	if (bytes < count) {
-		memcpy(buffer, sample->buffer, bytes);
-		memset(buffer + bytes, 0, count - bytes);
-	} else {
-		memcpy(buffer, sample->buffer, count);
-	}
-	
-	return !(sample->flags & SOUND_SAMPLEFLAG_ERROR);
-}
-
-int CDROM_Interface_Image::AudioFile::getLength()
-{
-	int length = Sound_GetDuration(sample);
-	return (int)floor((length * 176.4) + 0.5);
-}
-#endif
 
 // initialize static members
 int CDROM_Interface_Image::refCount = 0;
@@ -276,8 +232,6 @@ bool CDROM_Interface_Image::ReadSectors(PhysPt buffer, bool raw, unsigned long s
 bool CDROM_Interface_Image::ReadSectorsHost(void *buffer, bool raw, unsigned long sector, unsigned long num)
 {
 	int sectorSize = raw ? RAW_SECTOR_SIZE : COOKED_SECTOR_SIZE;
-	Bitu buflen = num * sectorSize;
-	
 	bool success = true; //Gobliiins reads 0 sectors
 	for(unsigned long i = 0; i < num; i++) {
 		success = ReadSector((Bit8u*)buffer + (i * sectorSize), raw, sector + i);
@@ -319,7 +273,7 @@ bool CDROM_Interface_Image::ReadSector(Bit8u *buffer, bool raw, unsigned long se
 	 * that doesn't exist on pure CD audio emulated images */
 	if (tracks[track].sectorSize == RAW_SECTOR_SIZE && !raw) {
 		if ((tracks[track].attr&0x40) == 0x00) {
-			LOG_MSG("Rejecting cooked read from raw audio CD sector");
+			LOG_MSG("Rejecting cooked read from raw audio CD sector\n");
 			return false;
 		}
 	}
@@ -551,21 +505,6 @@ bool CDROM_Interface_Image::LoadCueSheet(char *cuefile)
 			if (type == "BINARY") {
 				track.file = new BinaryFile(filename.c_str(), error);
 			}
-#if defined(C_SDL_SOUND)
-			//The next if has been surpassed by the else, but leaving it in as not 
-			//to break existing cue sheets that depend on this.(mine with OGG tracks specifying MP3 as type)
-			else if (type == "WAVE" || type == "AIFF" || type == "MP3") {
-				track.file = new AudioFile(filename.c_str(), error);
-			} else { 
-				const Sound_DecoderInfo **i;
-				for (i = Sound_AvailableDecoders(); *i != NULL; i++) {
-					if (*(*i)->extensions == type) {
-						track.file = new AudioFile(filename.c_str(), error);
-						break;
-					}
-				}
-			}
-#endif
 			if (error) {
 				delete track.file;
 				success = false;
@@ -765,14 +704,5 @@ void CDROM_Interface_Image::ClearTracks()
 }
 
 void CDROM_Image_Destroy(Section*) {
-#if defined(C_SDL_SOUND)
-	Sound_Quit();
-#endif
 }
 
-void CDROM_Image_Init(Section* section) {
-#if defined(C_SDL_SOUND)
-	Sound_Init();
-	section->AddDestroyFunction(CDROM_Image_Destroy, false);
-#endif
-}

@@ -18,17 +18,16 @@
 #include "mixer.h"
 #include "timer.h"
 #include "setup.h"
+#include "control.h"
 #include "callback.h"
 #include "bios_disk.h"
 #include "../src/dos/cdrom.h"
 
-#if 1 //def _MSC_VER
+#ifdef _MSC_VER
 # define MIN(a,b) ((a) < (b) ? (a) : (b))
 #else
 # define MIN(a,b) std::min(a,b)
 #endif
-
-#define MAX_IDE_CONTROLLERS 8
 
 static unsigned char init_ide = 0;
 
@@ -248,6 +247,7 @@ public:
 	bool int13fakev86io;		/* on certain INT 13h calls in virtual 8086 mode, trigger fake CPU I/O traps */
 	bool enable_pio32;		/* enable 32-bit PIO (if disabled, attempts at 32-bit PIO are handled as if two 16-bit I/O) */
 	bool ignore_pio32;		/* if 32-bit PIO enabled, but ignored, writes do nothing, reads return 0xFFFFFFFF */
+	bool register_pnp;
 	unsigned short alt_io;
 	unsigned short base_io;
 	unsigned char interface_index;
@@ -265,6 +265,7 @@ public:
 	double cd_insertion_time;
 public:
 	IDEController(Section* configuration,unsigned char index);
+    void register_isapnp();
 	void install_io_port();
 	void raise_irq();
 	void lower_irq();
@@ -729,12 +730,6 @@ void IDEATAPICDROMDevice::read_toc() {
 
 	memset(sector,0,8);
 
-	if (Format != 0) {
-		LOG_MSG("WARNING: ATAPI READ TOC Format=%u not supported\n",Format);
-		prepare_read(0,8);
-		return;
-	}
-
 	if (!cdrom->GetAudioTracks(first,last,leadOut)) {
 		LOG_MSG("WARNING: ATAPI READ TOC failed to get track info\n");
 		prepare_read(0,8);
@@ -743,32 +738,30 @@ void IDEATAPICDROMDevice::read_toc() {
 
 	/* start 2 bytes out. we'll fill in the data length later */
 	write = sector + 2;
-	*write++ = (unsigned char)first;	/* @+2 */
-	*write++ = (unsigned char)last;		/* @+3 */
 
-	for (track=first;track <= last;track++) {
+	if (Format == 1) { /* Read multisession info */
 		unsigned char attr;
 		TMSF start;
 
-		if (!cdrom->GetAudioTrackInfo(track,start,attr)) {
-			LOG_MSG("WARNING: ATAPI READ TOC unable to read track %u information\n",track);
+		*write++ = (unsigned char)1;		/* @+2 first complete session */
+		*write++ = (unsigned char)1;		/* @+3 last complete session */
+
+		if (!cdrom->GetAudioTrackInfo(first,start,attr)) {
+			LOG_MSG("WARNING: ATAPI READ TOC unable to read track %u information\n",first);
 			attr = 0x41; /* ADR=1 CONTROL=4 */
 			start.min = 0;
 			start.sec = 0;
 			start.fr = 0;
 		}
 
-		if (track < Track)
-			continue;
-		if ((write+8) > (sector+AllocationLength))
-			break;
-
-		LOG_MSG("Track %u attr=0x%02x\n",track,attr);
+		LOG_MSG("Track %u attr=0x%02x\n",first,attr);
 
 		*write++ = 0x00;		/* entry+0 RESERVED */
-		*write++ = (attr >> 4) | 0x10; /* entry+1 ADR=1 CONTROL=4 (DATA) */
-		*write++ = (unsigned char)track;/* entry+2 TRACK */
+		*write++ = (attr >> 4) | 0x10;  /* entry+1 ADR=1 CONTROL=4 (DATA) */
+		*write++ = (unsigned char)first;/* entry+2 TRACK */
 		*write++ = 0x00;		/* entry+3 RESERVED */
+
+		/* then, start address of first track in session */
 		if (TIME) {
 			*write++ = 0x00;
 			*write++ = start.min;
@@ -783,25 +776,72 @@ void IDEATAPICDROMDevice::read_toc() {
 			*write++ = (unsigned char)(sec >> 0);
 		}
 	}
+	else if (Format == 0) { /* Read table of contents */
+		*write++ = (unsigned char)first;	/* @+2 */
+		*write++ = (unsigned char)last;		/* @+3 */
 
-	if ((write+8) <= (sector+AllocationLength)) {
-		*write++ = 0x00;
-		*write++ = 0x14;
-		*write++ = 0xAA;/*TRACK*/
-		*write++ = 0x00;
-		if (TIME) {
+		for (track=first;track <= last;track++) {
+			unsigned char attr;
+			TMSF start;
+
+			if (!cdrom->GetAudioTrackInfo(track,start,attr)) {
+				LOG_MSG("WARNING: ATAPI READ TOC unable to read track %u information\n",track);
+				attr = 0x41; /* ADR=1 CONTROL=4 */
+				start.min = 0;
+				start.sec = 0;
+				start.fr = 0;
+			}
+
+			if (track < Track)
+				continue;
+			if ((write+8) > (sector+AllocationLength))
+				break;
+
+			LOG_MSG("Track %u attr=0x%02x\n",track,attr);
+
+			*write++ = 0x00;		/* entry+0 RESERVED */
+			*write++ = (attr >> 4) | 0x10; /* entry+1 ADR=1 CONTROL=4 (DATA) */
+			*write++ = (unsigned char)track;/* entry+2 TRACK */
+			*write++ = 0x00;		/* entry+3 RESERVED */
+			if (TIME) {
+				*write++ = 0x00;
+				*write++ = start.min;
+				*write++ = start.sec;
+				*write++ = start.fr;
+			}
+			else {
+				uint32_t sec = (start.min*60*75)+(start.sec*75)+start.fr - 150;
+				*write++ = (unsigned char)(sec >> 24);
+				*write++ = (unsigned char)(sec >> 16);
+				*write++ = (unsigned char)(sec >> 8);
+				*write++ = (unsigned char)(sec >> 0);
+			}
+		}
+
+		if ((write+8) <= (sector+AllocationLength)) {
 			*write++ = 0x00;
-			*write++ = leadOut.min;
-			*write++ = leadOut.sec;
-			*write++ = leadOut.fr;
+			*write++ = 0x14;
+			*write++ = 0xAA;/*TRACK*/
+			*write++ = 0x00;
+			if (TIME) {
+				*write++ = 0x00;
+				*write++ = leadOut.min;
+				*write++ = leadOut.sec;
+				*write++ = leadOut.fr;
+			}
+			else {
+				uint32_t sec = (leadOut.min*60*75)+(leadOut.sec*75)+leadOut.fr - 150;
+				*write++ = (unsigned char)(sec >> 24);
+				*write++ = (unsigned char)(sec >> 16);
+				*write++ = (unsigned char)(sec >> 8);
+				*write++ = (unsigned char)(sec >> 0);
+			}
 		}
-		else {
-			uint32_t sec = (leadOut.min*60*75)+(leadOut.sec*75)+leadOut.fr - 150;
-			*write++ = (unsigned char)(sec >> 24);
-			*write++ = (unsigned char)(sec >> 16);
-			*write++ = (unsigned char)(sec >> 8);
-			*write++ = (unsigned char)(sec >> 0);
-		}
+	}
+	else {
+		LOG_MSG("WARNING: ATAPI READ TOC Format=%u not supported\n",Format);
+		prepare_read(0,8);
+		return;
 	}
 
 	/* update the TOC data length field */
@@ -812,11 +852,6 @@ void IDEATAPICDROMDevice::read_toc() {
 	}
 
 	prepare_read(0,MIN(MIN((unsigned int)(write-sector),(unsigned int)host_maximum_byte_count),AllocationLength));
-#if 0
-	printf("TOC ");
-	for (size_t i=0;i < sector_total;i++) printf("%02x ",sector[i]);
-	printf("\n");
-#endif
 }
 
 /* when the ATAPI command has been accepted, and the timeout has passed */
@@ -826,6 +861,7 @@ void IDEATAPICDROMDevice::on_atapi_busy_time() {
 		switch (atapi_cmd[0]) {
 			case 0x00: /* TEST UNIT READY */
 			case 0x03: /* REQUEST SENSE */
+                allow_writing = true;
 				break; /* do not delay */
 			default:
 				PIC_AddEvent(IDE_DelayedCommand,100/*ms*/,controller->interface_index);
@@ -836,6 +872,7 @@ void IDEATAPICDROMDevice::on_atapi_busy_time() {
 		switch (atapi_cmd[0]) {
 			case 0x00: /* TEST UNIT READY */
 			case 0x03: /* REQUEST SENSE */
+                allow_writing = true;
 				break; /* do not delay */
 			default:
 				if (!common_spinup_response(/*spin up*/true,/*wait*/false)) {
@@ -844,7 +881,8 @@ void IDEATAPICDROMDevice::on_atapi_busy_time() {
 					feature = ((sense[2]&0xF) << 4) | (sense[2]&0xF ? 0x04/*abort*/ : 0x00);
 					status = IDE_STATUS_DRIVE_READY|(sense[2]&0xF ? IDE_STATUS_ERROR:IDE_STATUS_DRIVE_SEEK_COMPLETE);
 					controller->raise_irq();
-					return;
+                    allow_writing = true;
+                    return;
 				}
 				break;
 		}
@@ -864,7 +902,8 @@ void IDEATAPICDROMDevice::on_atapi_busy_time() {
 			lba[1] = sector_total;
 
 			controller->raise_irq();
-			break;
+            allow_writing = true;
+            break;
 		case 0x1E: /* PREVENT ALLOW MEDIUM REMOVAL */
 			count = 0x03;
 			feature = 0x00;
@@ -879,6 +918,7 @@ void IDEATAPICDROMDevice::on_atapi_busy_time() {
 			lba[1] = sector_total;
 
 			controller->raise_irq();
+            allow_writing = true;
 			break;
 		case 0x25: /* READ CAPACITY */ {
 			const unsigned int secsize = 2048;
@@ -912,6 +952,7 @@ void IDEATAPICDROMDevice::on_atapi_busy_time() {
 			lba[1] = sector_total;
 
 			controller->raise_irq();
+            allow_writing = true;
 			} break;
 		case 0x2B: /* SEEK */
 			count = 0x03;
@@ -945,6 +986,7 @@ void IDEATAPICDROMDevice::on_atapi_busy_time() {
 			lba[1] = sector_total;
 
 			controller->raise_irq();
+            allow_writing = true;
 			break;
 		case 0x12: /* INQUIRY */
 			/* NTS: the state of atapi_to_host doesn't seem to matter. */
@@ -960,6 +1002,7 @@ void IDEATAPICDROMDevice::on_atapi_busy_time() {
 			lba[1] = sector_total;
 
 			controller->raise_irq();
+            allow_writing = true;
 			break;
 		case 0x28: /* READ(10) */
 		case 0xA8: /* READ(12) */
@@ -1000,6 +1043,7 @@ void IDEATAPICDROMDevice::on_atapi_busy_time() {
 			lba[1] = sector_total;
 
 			controller->raise_irq();
+            allow_writing = true;
 			break;
 		case 0x42: /* READ SUB-CHANNEL */
 			read_subchannel();
@@ -1013,6 +1057,7 @@ void IDEATAPICDROMDevice::on_atapi_busy_time() {
 			lba[1] = sector_total;
 
 			controller->raise_irq();
+            allow_writing = true;
 			break;
 		case 0x43: /* READ TOC */
 			read_toc();
@@ -1026,6 +1071,7 @@ void IDEATAPICDROMDevice::on_atapi_busy_time() {
 			lba[1] = sector_total;
 
 			controller->raise_irq();
+            allow_writing = true;
 			break;
 		case 0x45: /* PLAY AUDIO(10) */
 			play_audio10();
@@ -1041,6 +1087,7 @@ void IDEATAPICDROMDevice::on_atapi_busy_time() {
 			lba[1] = sector_total;
 
 			controller->raise_irq();
+            allow_writing = true;
 			break;
 		case 0x47: /* PLAY AUDIO MSF */
 			play_audio_msf();
@@ -1056,6 +1103,7 @@ void IDEATAPICDROMDevice::on_atapi_busy_time() {
 			lba[1] = sector_total;
 
 			controller->raise_irq();
+            allow_writing = true;
 			break;
 		case 0x4B: /* PAUSE/RESUME */
 			pause_resume();
@@ -1071,6 +1119,7 @@ void IDEATAPICDROMDevice::on_atapi_busy_time() {
 			lba[1] = sector_total;
 
 			controller->raise_irq();
+            allow_writing = true;
 			break;
 		case 0x55: /* MODE SELECT(10) */
 			/* we need the data written first, will act in I/O completion routine */
@@ -1093,6 +1142,7 @@ void IDEATAPICDROMDevice::on_atapi_busy_time() {
 			state = IDE_DEV_DATA_WRITE;
 			status = IDE_STATUS_DRIVE_READY|IDE_STATUS_DRQ|IDE_STATUS_DRIVE_SEEK_COMPLETE;
 			controller->raise_irq();
+            allow_writing = true;
 			break;
 		case 0x5A: /* MODE SENSE(10) */
 			mode_sense();
@@ -1106,11 +1156,13 @@ void IDEATAPICDROMDevice::on_atapi_busy_time() {
 			lba[1] = sector_total;
 
 			controller->raise_irq();
+            allow_writing = true;
 			break;
 		default:
 			LOG_MSG("Unknown ATAPI command after busy wait. Why?\n");
 			abort_error();
 			controller->raise_irq();
+            allow_writing = true;
 			break;
 	};
 
@@ -1428,6 +1480,7 @@ void IDEATAPICDROMDevice::atapi_cmd_completion() {
 			feature = ((sense[2]&0xF) << 4) | (sense[2]&0xF ? 0x04/*abort*/ : 0x00);
 			status = IDE_STATUS_DRIVE_READY|(sense[2]&0xF ? IDE_STATUS_ERROR:IDE_STATUS_DRIVE_SEEK_COMPLETE);
 			controller->raise_irq();
+			allow_writing = true;
 			break;
 		case 0x03: /* REQUEST SENSE */
 			count = 0x02;
@@ -1461,7 +1514,8 @@ void IDEATAPICDROMDevice::atapi_cmd_completion() {
 				feature = ((sense[2]&0xF) << 4) | (sense[2]&0xF ? 0x04/*abort*/ : 0x00);
 				status = IDE_STATUS_DRIVE_READY|(sense[2]&0xF ? IDE_STATUS_ERROR:IDE_STATUS_DRIVE_SEEK_COMPLETE);
 				controller->raise_irq();
-			}
+                allow_writing = true;
+            }
 			break;
 		case 0x12: /* INQUIRY */
 			count = 0x02;
@@ -1507,7 +1561,8 @@ void IDEATAPICDROMDevice::atapi_cmd_completion() {
 				feature = ((sense[2]&0xF) << 4) | (sense[2]&0xF ? 0x04/*abort*/ : 0x00);
 				status = IDE_STATUS_DRIVE_READY|(sense[2]&0xF ? IDE_STATUS_ERROR:IDE_STATUS_DRIVE_SEEK_COMPLETE);
 				controller->raise_irq();
-			}
+                allow_writing = true;
+            }
 			break;
 		case 0x28: /* READ(10) */
 			if (common_spinup_response(/*spin up*/true,/*wait*/true)) {
@@ -1545,7 +1600,8 @@ void IDEATAPICDROMDevice::atapi_cmd_completion() {
 				feature = ((sense[2]&0xF) << 4) | (sense[2]&0xF ? 0x04/*abort*/ : 0x00);
 				status = IDE_STATUS_DRIVE_READY|(sense[2]&0xF ? IDE_STATUS_ERROR:IDE_STATUS_DRIVE_SEEK_COMPLETE);
 				controller->raise_irq();
-			}
+                allow_writing = true;
+            }
 			break;
 		case 0x42: /* READ SUB-CHANNEL */
 			if (common_spinup_response(/*spin up*/true,/*wait*/true)) {
@@ -1562,7 +1618,8 @@ void IDEATAPICDROMDevice::atapi_cmd_completion() {
 				feature = ((sense[2]&0xF) << 4) | (sense[2]&0xF ? 0x04/*abort*/ : 0x00);
 				status = IDE_STATUS_DRIVE_READY|(sense[2]&0xF ? IDE_STATUS_ERROR:IDE_STATUS_DRIVE_SEEK_COMPLETE);
 				controller->raise_irq();
-			}
+                allow_writing = true;
+            }
 			break;
 		case 0x43: /* READ TOC */
 			if (common_spinup_response(/*spin up*/true,/*wait*/true)) {
@@ -1579,7 +1636,8 @@ void IDEATAPICDROMDevice::atapi_cmd_completion() {
 				feature = ((sense[2]&0xF) << 4) | (sense[2]&0xF ? 0x04/*abort*/ : 0x00);
 				status = IDE_STATUS_DRIVE_READY|(sense[2]&0xF ? IDE_STATUS_ERROR:IDE_STATUS_DRIVE_SEEK_COMPLETE);
 				controller->raise_irq();
-			}
+                allow_writing = true;
+            }
 			break;
 		case 0x45: /* PLAY AUDIO (1) */
 		case 0x47: /* PLAY AUDIO MSF */
@@ -1598,7 +1656,8 @@ void IDEATAPICDROMDevice::atapi_cmd_completion() {
 				feature = ((sense[2]&0xF) << 4) | (sense[2]&0xF ? 0x04/*abort*/ : 0x00);
 				status = IDE_STATUS_DRIVE_READY|(sense[2]&0xF ? IDE_STATUS_ERROR:IDE_STATUS_DRIVE_SEEK_COMPLETE);
 				controller->raise_irq();
-			}
+                allow_writing = true;
+            }
 			break;
 		case 0x55: /* MODE SELECT(10) */
 			count = 0x00;	/* we will be accepting data */
@@ -1622,6 +1681,7 @@ void IDEATAPICDROMDevice::atapi_cmd_completion() {
 			count = 0x03; /* no more data (command/data=1, input/output=1) */
 			feature = 0xF4;
 			controller->raise_irq();
+			allow_writing = true;
 			break;
 	};
 }
@@ -1650,7 +1710,7 @@ void IDEATAPICDROMDevice::data_write(Bitu v,Bitu iolen) {
 			return;
 		}
 		if ((sector_i+iolen) > sector_total) {
-			LOG_MSG("ide atapi warning: sector already full %u / %u\n",sector_i,sector_total);
+			LOG_MSG("ide atapi warning: sector already full %lu / %lu\n",(unsigned long)sector_i,(unsigned long)sector_total);
 			return;
 		}
 
@@ -1683,7 +1743,7 @@ Bitu IDEATADevice::data_read(Bitu iolen) {
 	}
 
 	if ((sector_i+iolen) > sector_total) {
-		LOG_MSG("ide ata warning: sector already read %u / %u\n",sector_i,sector_total);
+		LOG_MSG("ide ata warning: sector already read %lu / %lu\n",(unsigned long)sector_i,(unsigned long)sector_total);
 		return 0xFFFFUL;
 	}
 
@@ -1716,7 +1776,7 @@ void IDEATADevice::data_write(Bitu v,Bitu iolen) {
 		return;
 	}
 	if ((sector_i+iolen) > sector_total) {
-		LOG_MSG("ide ata warning: sector already full %u / %u\n",sector_i,sector_total);
+		LOG_MSG("ide ata warning: sector already full %lu / %lu\n",(unsigned long)sector_i,(unsigned long)sector_total);
 		return;
 	}
 
@@ -2029,13 +2089,21 @@ void IDEATADevice::update_from_biosdisk() {
 		LOG_MSG("Some OSes, such as Windows 95, will not enable their 32-bit IDE driver if\n");
 		LOG_MSG("a clean mapping does not exist between IDE and BIOS geometry.\n");
 		LOG_MSG("Mapping BIOS DISK C/H/S %u/%u/%u as IDE %u/%u/%u (non-straightforward mapping)\n",
-			dsk->cylinders,dsk->heads,dsk->sectors,
-			cyls,heads,sects);
+			(unsigned int)dsk->cylinders,
+			(unsigned int)dsk->heads,
+			(unsigned int)dsk->sectors,
+			(unsigned int)cyls,
+			(unsigned int)heads,
+			(unsigned int)sects);
 	}
 	else {
 		LOG_MSG("Mapping BIOS DISK C/H/S %u/%u/%u as IDE %u/%u/%u\n",
-			dsk->cylinders,dsk->heads,dsk->sectors,
-			cyls,heads,sects);
+			(unsigned int)dsk->cylinders,
+			(unsigned int)dsk->heads,
+			(unsigned int)dsk->sectors,
+			(unsigned int)cyls,
+			(unsigned int)heads,
+			(unsigned int)sects);
 	}
 
 	phys_heads = heads;
@@ -2254,10 +2322,11 @@ void IDE_EmuINT13DiskReadByBIOS_LBA(unsigned char disk,uint64_t lba) {
 						IDE_SelfIO_Out(ide,ide->base_io+7,0x20,1);	/* issue READ */
 
 						do {
-							/* TODO: Timeout needed */
-							unsigned int i = IDE_SelfIO_In(ide,ide->base_io+7,1);
-							if ((i&0x80) == 0) break;
-						} while (1);
+                            /* TODO: Timeout needed */
+                            unsigned int i = IDE_SelfIO_In(ide,ide->alt_io,1);
+                            if ((i&0x80) == 0) break;
+                        } while (1);
+                        IDE_SelfIO_In(ide,ide->base_io+7,1);
 
 						/* for brevity assume it worked. we're here to bullshit Windows 95 after all */
 						for (unsigned int i=0;i < 256;i++)
@@ -2272,6 +2341,7 @@ void IDE_EmuINT13DiskReadByBIOS_LBA(unsigned char disk,uint64_t lba) {
 						else
 							IDE_SelfIO_Out(ide,0x20,0x60+ide->IRQ,1);		/* specific EOI */
 
+                        ata->abort_normal();
 						dev->faked_command = false;
 					}
 					else {
@@ -2421,10 +2491,11 @@ void IDE_EmuINT13DiskReadByBIOS(unsigned char disk,unsigned int cyl,unsigned int
 						IDE_SelfIO_Out(ide,ide->base_io+7,0x20,1);	/* issue READ */
 
 						do {
-							/* TODO: Timeout needed */
-							unsigned int i = IDE_SelfIO_In(ide,ide->base_io+7,1);
-							if ((i&0x80) == 0) break;
-						} while (1);
+                            /* TODO: Timeout needed */
+                            unsigned int i = IDE_SelfIO_In(ide,ide->alt_io,1);
+                            if ((i&0x80) == 0) break;
+                        } while (1);
+                        IDE_SelfIO_In(ide,ide->base_io+7,1);
 
 						/* for brevity assume it worked. we're here to bullshit Windows 95 after all */
 						for (unsigned int i=0;i < 256;i++)
@@ -2439,6 +2510,7 @@ void IDE_EmuINT13DiskReadByBIOS(unsigned char disk,unsigned int cyl,unsigned int
 						else
 							IDE_SelfIO_Out(ide,0x20,0x60+ide->IRQ,1);		/* specific EOI */
 
+                        ata->abort_normal();
 						dev->faked_command = false;
 					}
 					else {
@@ -2509,8 +2581,9 @@ void IDE_ResetDiskByBIOS(unsigned char disk) {
 
 				if ((ata->bios_disk_index-2) == (disk-0x80)) {
 					LOG_MSG("IDE %d%c reset by BIOS disk 0x%02x\n",
-						idx+1,ms?'s':'m',
-						disk);
+						(unsigned int)(idx+1),
+						ms?'s':'m',
+						(unsigned int)disk);
 
 					if (ide->int13fakev86io && IDE_CPU_Is_Vm86()) {
 						/* issue the DEVICE RESET command */
@@ -2580,12 +2653,12 @@ static void IDE_DelayedCommand(Bitu idx/*which IDE controller*/) {
 						(unsigned int)ata->lba[0] > (unsigned int)ata->sects ||
 						(unsigned int)(ata->lba[1] | (ata->lba[2] << 8)) >= (unsigned int)ata->cyls) {
 						LOG_MSG("C/H/S %u/%u/%u out of bounds %u/%u/%u\n",
-							ata->lba[1] | (ata->lba[2] << 8),
-							ata->drivehead&0xF,
-							ata->lba[0],
-							ata->cyls,
-							ata->heads,
-							ata->sects);
+							(unsigned int)(ata->lba[1] | (ata->lba[2] << 8)),
+							(unsigned int)(ata->drivehead&0xF),
+							(unsigned int)(ata->lba[0]),
+							(unsigned int)ata->cyls,
+							(unsigned int)ata->heads,
+							(unsigned int)ata->sects);
 						ata->abort_error();
 						dev->controller->raise_irq();
 						return;
@@ -2662,12 +2735,12 @@ static void IDE_DelayedCommand(Bitu idx/*which IDE controller*/) {
 						(unsigned int)ata->lba[0] > (unsigned int)ata->sects ||
 						(unsigned int)(ata->lba[1] | (ata->lba[2] << 8)) >= (unsigned int)ata->cyls) {
 						LOG_MSG("C/H/S %u/%u/%u out of bounds %u/%u/%u\n",
-							ata->lba[1] | (ata->lba[2] << 8),
-							ata->drivehead&0xF,
-							ata->lba[0],
-							ata->cyls,
-							ata->heads,
-							ata->sects);
+							(unsigned int)(ata->lba[1] | (ata->lba[2] << 8)),
+							(unsigned int)(ata->drivehead&0xF),
+							(unsigned int)ata->lba[0],
+							(unsigned int)ata->cyls,
+							(unsigned int)ata->heads,
+							(unsigned int)ata->sects);
 						ata->abort_error();
 						dev->controller->raise_irq();
 						return;
@@ -2726,12 +2799,12 @@ static void IDE_DelayedCommand(Bitu idx/*which IDE controller*/) {
 						(unsigned int)ata->lba[0] > (unsigned int)ata->sects ||
 						(unsigned int)(ata->lba[1] | (ata->lba[2] << 8)) >= (unsigned int)ata->cyls) {
 						LOG_MSG("C/H/S %u/%u/%u out of bounds %u/%u/%u\n",
-							ata->lba[1] | (ata->lba[2] << 8),
-							ata->drivehead&0xF,
-							ata->lba[0],
-							ata->cyls,
-							ata->heads,
-							ata->sects);
+							(unsigned int)(ata->lba[1] | (ata->lba[2] << 8)),
+							(unsigned int)(ata->drivehead&0xF),
+							(unsigned int)ata->lba[0],
+							(unsigned int)ata->cyls,
+							(unsigned int)ata->heads,
+							(unsigned int)ata->sects);
 						ata->abort_error();
 						dev->controller->raise_irq();
 						return;
@@ -2802,12 +2875,12 @@ static void IDE_DelayedCommand(Bitu idx/*which IDE controller*/) {
 						(unsigned int)ata->lba[0] > (unsigned int)ata->sects ||
 						(unsigned int)(ata->lba[1] | (ata->lba[2] << 8)) >= (unsigned int)ata->cyls) {
 						LOG_MSG("C/H/S %u/%u/%u out of bounds %u/%u/%u\n",
-							ata->lba[1] | (ata->lba[2] << 8),
-							ata->drivehead&0xF,
-							ata->lba[0],
-							ata->cyls,
-							ata->heads,
-							ata->sects);
+							(unsigned int)(ata->lba[1] | (ata->lba[2] << 8)),
+							(unsigned int)(ata->drivehead&0xF),
+							(unsigned int)ata->lba[0],
+							(unsigned int)ata->cyls,
+							(unsigned int)ata->heads,
+							(unsigned int)ata->sects);
 						ata->abort_error();
 						dev->controller->raise_irq();
 						return;
@@ -2821,7 +2894,7 @@ static void IDE_DelayedCommand(Bitu idx/*which IDE controller*/) {
 				if ((512*ata->multiple_sector_count) > sizeof(ata->sector))
 					E_Exit("SECTOR OVERFLOW");
 
-				for (unsigned int cc=0;cc < MIN(ata->multiple_sector_count,sectcount);cc++) {
+				for (unsigned int cc=0;cc < MIN((Bitu)ata->multiple_sector_count,(Bitu)sectcount);cc++) {
 					/* it would be great if the disk object had a "read multiple sectors" member function */
 					if (disk->Read_AbsoluteSector(sectorn+cc, ata->sector+(cc*512)) != 0) {
 						LOG_MSG("ATA read failed\n");
@@ -2838,7 +2911,7 @@ static void IDE_DelayedCommand(Bitu idx/*which IDE controller*/) {
 				/* NTS: The sector advance + count decrement is done in the I/O completion function */
 				dev->state = IDE_DEV_DATA_READ;
 				dev->status = IDE_STATUS_DRQ|IDE_STATUS_DRIVE_READY|IDE_STATUS_DRIVE_SEEK_COMPLETE;
-				ata->prepare_read(0,512*MIN(ata->multiple_sector_count,sectcount));
+				ata->prepare_read(0,512*MIN((Bitu)ata->multiple_sector_count,(Bitu)sectcount));
 				dev->controller->raise_irq();
 				break;
 
@@ -2871,12 +2944,12 @@ static void IDE_DelayedCommand(Bitu idx/*which IDE controller*/) {
 						(unsigned int)ata->lba[0] > (unsigned int)ata->sects ||
 						(unsigned int)(ata->lba[1] | (ata->lba[2] << 8)) >= (unsigned int)ata->cyls) {
 						LOG_MSG("C/H/S %u/%u/%u out of bounds %u/%u/%u\n",
-							ata->lba[1] | (ata->lba[2] << 8),
-							ata->drivehead&0xF,
-							ata->lba[0],
-							ata->cyls,
-							ata->heads,
-							ata->sects);
+							(unsigned int)(ata->lba[1] | (ata->lba[2] << 8)),
+							(unsigned int)(ata->drivehead&0xF),
+							(unsigned int)ata->lba[0],
+							(unsigned int)ata->cyls,
+							(unsigned int)ata->heads,
+							(unsigned int)ata->sects);
 						ata->abort_error();
 						dev->controller->raise_irq();
 						return;
@@ -2887,7 +2960,7 @@ static void IDE_DelayedCommand(Bitu idx/*which IDE controller*/) {
 						(ata->lba[0] - 1);
 				}
 
-				for (unsigned int cc=0;cc < MIN(ata->multiple_sector_count,sectcount);cc++) {
+				for (unsigned int cc=0;cc < MIN((Bitu)ata->multiple_sector_count,(Bitu)sectcount);cc++) {
 					/* it would be great if the disk object had a "write multiple sectors" member function */
 					if (disk->Write_AbsoluteSector(sectorn+cc, ata->sector+(cc*512)) != 0) {
 						LOG_MSG("Failed to write sector\n");
@@ -2897,7 +2970,7 @@ static void IDE_DelayedCommand(Bitu idx/*which IDE controller*/) {
 					}
 				}
 
-				for (unsigned int cc=0;cc < MIN(ata->multiple_sector_count,sectcount);cc++) {
+				for (unsigned int cc=0;cc < MIN((Bitu)ata->multiple_sector_count,(Bitu)sectcount);cc++) {
 					if ((ata->count&0xFF) == 1) {
 						/* end of the transfer */
 						ata->count = 0;
@@ -2923,7 +2996,7 @@ static void IDE_DelayedCommand(Bitu idx/*which IDE controller*/) {
 				if (sectcount == 0) sectcount = 256;
 				dev->state = IDE_DEV_DATA_WRITE;
 				dev->status = IDE_STATUS_DRQ|IDE_STATUS_DRIVE_READY|IDE_STATUS_DRIVE_SEEK_COMPLETE;
-				ata->prepare_write(0,512*MIN(ata->multiple_sector_count,sectcount));
+				ata->prepare_write(0,512*MIN((Bitu)ata->multiple_sector_count,(Bitu)sectcount));
 				dev->controller->raise_irq();
 				break;
 
@@ -3221,16 +3294,16 @@ void IDEATADevice::writecommand(uint8_t cmd) {
 			uint64_t n;
 
 			n = ((drivehead&0xF)<<24)+(lba[2]<<16)+(lba[1]<<8)+lba[0];
-//            LOG_MSG("IDE ATA command %02x dh=0x%02x count=0x%02x lba=%07llx/%07llx\n",cmd,
-//                drivehead,count,(unsigned long long)n,
-//                (unsigned long long)(phys_sects * phys_cyls * phys_heads));
+			LOG_MSG("IDE ATA command %02x dh=0x%02x count=0x%02x lba=%07llx/%07llx\n",cmd,
+				drivehead,count,(unsigned long long)n,
+				(unsigned long long)(phys_sects * phys_cyls * phys_heads));
 		}
 		else {
-//            LOG_MSG("IDE ATA command %02x dh=0x%02x count=0x%02x chs=%02x/%02x/%02x\n",cmd,
-//                drivehead,count,(lba[2]<<8)+lba[1],drivehead&0xF,lba[0]);
+			LOG_MSG("IDE ATA command %02x dh=0x%02x count=0x%02x chs=%02x/%02x/%02x\n",cmd,
+				drivehead,count,(lba[2]<<8)+lba[1],drivehead&0xF,lba[0]);
 		}
 
-//        LOG(LOG_SB,LOG_NORMAL)("IDE ATA command %02x",cmd);
+		LOG(LOG_SB,LOG_NORMAL)("IDE ATA command %02x",cmd);
 	}
 
 	/* if the drive is asleep, then writing a command wakes it up */
@@ -3310,8 +3383,8 @@ void IDEATADevice::writecommand(uint8_t cmd) {
 
 					/* the OS is changing logical disk geometry, so update our head/sector count (needed for Windows ME) */
 					LOG_MSG("IDE warning: OS is changing logical geometry from C/H/S %u/%u/%u to logical H/S %u/%u/%u\n",
-						cyls,heads,sects,
-						ncyls,(drivehead&0xF)+1,count);
+						(int)cyls,(int)heads,(int)sects,
+						(int)ncyls,(int)((drivehead&0xF)+1),(int)count);
 					LOG_MSG("             Compatibility issues may occur if the OS tries to use INT 13 at the same time!\n");
 
 					cyls = ncyls;
@@ -3351,6 +3424,27 @@ void IDEATADevice::writecommand(uint8_t cmd) {
 			controller->raise_irq();
 			allow_writing = true;
 			break;
+		case 0xA0:/*ATAPI PACKET*/
+			/* We're not an ATAPI packet device!
+			 * Windows 95 seems to issue this at startup to hard drives. Duh. */
+			/* fall through */
+		case 0xA1: /* IDENTIFY PACKET DEVICE */
+			/* We are not an ATAPI packet device.
+			 * Most MS-DOS drivers and Windows 95 like to issue both IDENTIFY ATA and IDENTIFY ATAPI commands.
+			 * I also gather from some contributers on the github comments that people think our "Unknown IDE/ATA command"
+			 * error message is part of some other error in the emulation. Rather than put up with that, we'll just
+			 * silently abort the command with an error. */
+			abort_normal();
+			status = IDE_STATUS_ERROR|IDE_STATUS_DRIVE_READY;
+			drivehead &= 0x30; controller->drivehead = drivehead;
+			count = 0x01;
+			lba[0] = 0x01;
+			feature = 0x04;	/* abort */
+			lba[1] = 0x00;
+			lba[2] = 0x00;
+			controller->raise_irq();
+			allow_writing = true;
+			break;
 		case 0xEC: /* IDENTIFY DEVICE */
 			state = IDE_DEV_BUSY;
 			status = IDE_STATUS_BUSY;
@@ -3381,7 +3475,6 @@ void IDEDevice::select(uint8_t ndh,bool switched_to) {
 
 IDEController::IDEController(Section* configuration,unsigned char index):Module_base(configuration){
 	Section_prop * section=static_cast<Section_prop *>(configuration);
-	bool register_pnp = false;
 	int i;
 
 	register_pnp = section->Get_bool("pnp");
@@ -3423,7 +3516,9 @@ IDEController::IDEController(Section* configuration,unsigned char index):Module_
 		if (IRQ < 0 || alt_io == 0 || base_io == 0)
 			LOG_MSG("WARNING: IDE interface %u: Insufficient resources assigned by dosbox.conf, and no appropriate default resources for this interface.",index);
 	}
+}
 
+void IDEController::register_isapnp() {
 	if (register_pnp && base_io > 0 && alt_io > 0) {
 		unsigned char tmp[256];
 		unsigned int i;
@@ -3450,7 +3545,7 @@ IDEController::IDEController(Section* configuration,unsigned char index):Module_
 		tmp[i+1] = 0x01;				/* 16-bit decode */
 		host_writew(tmp+i+2,alt_io);			/* min */
 		host_writew(tmp+i+4,alt_io);			/* max */
-		tmp[i+6] = 0x04;				/* align */
+		tmp[i+6] = 0x01;				/* align */
 		if (alt_io == 0x3F6 && fdc_takes_port_3F7())
 			tmp[i+7] = 0x01;			/* length 1 (so as not to conflict with floppy controller at 0x3F7) */
 		else
@@ -3665,7 +3760,7 @@ static void ide_baseio_w(Bitu port,Bitu val,Bitu iolen) {
 				return;
 			}
 			else {
-				LOG_MSG("W-%03X %02X BUSY DROP [DEV]\n",port+ide->base_io,val);
+				LOG_MSG("W-%03X %02X BUSY DROP [DEV]\n",(int)(port+ide->base_io),(int)val);
 				return;
 			}
 		}
@@ -3676,10 +3771,20 @@ static void ide_baseio_w(Bitu port,Bitu val,Bitu iolen) {
 			return;
 		}
 		else {
-			LOG_MSG("W-%03X %02X BUSY DROP [IDE]\n",port+ide->base_io,val);
+			LOG_MSG("W-%03X %02X BUSY DROP [IDE]\n",(int)(port+ide->base_io),(int)val);
 			return;
 		}
 	}
+
+#if 0
+    if (ide == idecontroller[1])
+        LOG_MSG("IDE: baseio write port %u val %02x\n",(unsigned int)port,(unsigned int)val);
+#endif
+
+    if (port >= 1 && port <= 5 && dev && !dev->allow_writing) {
+        LOG_MSG("IDE WARNING: Write to port %u val %02x when device not ready to accept writing\n",
+            (unsigned int)port,(unsigned int)val);
+    }
 
 	switch (port) {
 		case 0:	/* 1F0 */
@@ -3742,21 +3847,28 @@ static void IDE_Destroy(Section* sec) {
 	init_ide = 0;
 }
 
-static void IDE_Init(Section* sec,unsigned char interface) {
+static void IDE_Init(Section* sec,unsigned char ide_interface) {
 	Section_prop *section=static_cast<Section_prop *>(sec);
 	IDEController *ide;
 
-	assert(interface < MAX_IDE_CONTROLLERS);
+	assert(ide_interface < MAX_IDE_CONTROLLERS);
 
 	if (!section->Get_bool("enable"))
 		return;
 
 	if (!init_ide) {
-		sec->AddDestroyFunction(&IDE_Destroy);
+		AddExitFunction(AddExitFunctionFuncPair(IDE_Destroy));
 		init_ide = 1;
 	}
 
-	ide = idecontroller[interface] = new IDEController(sec,interface);
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing IDE controller %u",ide_interface);
+
+    if (idecontroller[ide_interface] != NULL) {
+        delete idecontroller[ide_interface];
+        idecontroller[ide_interface] = NULL;
+    }
+
+	ide = idecontroller[ide_interface] = new IDEController(sec,ide_interface);
 	ide->install_io_port();
 
 	PIC_SetIRQMask(ide->IRQ,false);
@@ -3794,815 +3906,59 @@ void IDE_Octernary_Init(Section *sec) {
 	IDE_Init(sec,7);
 }
 
-/* -------------------- FLOPPY CONTROLLER (TODO MOVE) -------------------- */
-
-#include "dma.h"
-
-#define MAX_FLOPPY_CONTROLLERS 8
-
-static unsigned char init_floppy = 0;
-
-class FloppyController;
-
-class FloppyDevice {
-public:
-	FloppyController *controller;
-public:
-	unsigned char current_track;
-	bool select,motor;
-	bool track0;
-public:
-	FloppyDevice(FloppyController *c);
-	void set_select(bool enable);	/* set selection on/off */
-	void set_motor(bool enable);	/* set motor on/off */
-	void motor_step(int dir);
-	virtual ~FloppyDevice();
+const char *ide_names[MAX_IDE_CONTROLLERS] = {
+	"ide, primary",
+	"ide, secondary",
+	"ide, tertiary",
+	"ide, quaternary",
+	"ide, quinternary",
+	"ide, sexternary",
+	"ide, septernary",
+	"ide, octernary"
+};
+void (*ide_inits[MAX_IDE_CONTROLLERS])(Section *) = {
+	&IDE_Primary_Init,
+	&IDE_Secondary_Init,
+	&IDE_Tertiary_Init,
+	&IDE_Quaternary_Init,
+	&IDE_Quinternary_Init,
+	&IDE_Sexternary_Init,
+	&IDE_Septernary_Init,
+	&IDE_Octernary_Init
 };
 
-class FloppyController:public Module_base{
-public:
-	int IRQ;
-	int DMA;
-	unsigned short base_io;
-	unsigned char interface_index;
-	IO_ReadHandleObject ReadHandler[8];
-	IO_WriteHandleObject WriteHandler[8];
-	uint8_t digital_output_register;
-	bool int13fakev86io;		/* on certain INT 13h calls in virtual 8086 mode, trigger fake CPU I/O traps */
-	bool instant_mode;		/* make floppy operations instantaneous if true */
-	bool data_register_ready;	/* 0x3F4 bit 7 */
-	bool data_read_expected;	/* 0x3F4 bit 6 (DIO) if set CPU is expected to read from the controller */
-	bool non_dma_mode;		/* 0x3F4 bit 5 (NDMA) */
-	bool busy_status;		/* 0x3F4 bit 4 (BUSY). By "busy" the floppy controller is in the middle of an instruction */
-	bool positioning[4];		/* 0x3F4 bit 0-3 floppy A...D in positioning mode */
-	bool irq_pending;
-/* FDC internal registers */
-	uint8_t ST[4];			/* ST0..ST3 */
-	uint8_t current_cylinder;
-/* buffers */
-	uint8_t in_cmd[16];
-	uint8_t in_cmd_len;
-	uint8_t in_cmd_pos;
-	uint8_t out_res[16];
-	uint8_t out_res_len;
-	uint8_t out_res_pos;
-	unsigned int motor_steps;
-	int motor_dir;
-	float fdc_motor_step_delay;
-	bool in_cmd_state;
-	bool out_res_state;
-public:
-	bool dma_irq_enabled();
-	int drive_selected();
-	void reset_cmd();
-	void reset_res();
-	void reset_io();
-	void update_ST3();
-	uint8_t fdc_data_read();
-	void fdc_data_write(uint8_t b);
-	void prepare_res_phase(uint8_t len);
-	void on_dor_change(unsigned char b);
-	void invalid_command_code();
-	void on_fdc_in_command();
-	void on_reset();
-public:
-	DmaChannel* dma;
-	FloppyDevice* device[4];	/* Floppy devices */
-public:
-	FloppyController(Section* configuration,unsigned char index);
-	void install_io_port();
-	void raise_irq();
-	void lower_irq();
-	~FloppyController();
-};
-
-static FloppyController* floppycontroller[MAX_FLOPPY_CONTROLLERS]={NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL};
-
-static void fdc_baseio_w(Bitu port,Bitu val,Bitu iolen);
-static Bitu fdc_baseio_r(Bitu port,Bitu iolen);
-
-void FDC_MotorStep(Bitu idx/*which IDE controller*/) {
-	FloppyController *fdc;
-	FloppyDevice *dev;
-
-	if (idx >= MAX_FLOPPY_CONTROLLERS) return;
-	fdc = floppycontroller[idx];
-	if (fdc == NULL) return;
-
-	dev = fdc->device[fdc->drive_selected()&3];
-
-//	LOG_MSG("FDC: motor step. if=%u rem=%u dir=%d current=%u\n",
-//		idx,fdc->motor_steps,fdc->motor_dir,fdc->current_cylinder);
-
-	if (dev != NULL && dev->track0) {
-		LOG_MSG("FDC: motor step abort. floppy drive signalling track0\n");
-		fdc->motor_steps = 0;
-		fdc->current_cylinder = 0;
-	}
-
-	if (fdc->motor_steps > 0) {
-		fdc->motor_steps--;
-		fdc->current_cylinder += fdc->motor_dir;
-		if (fdc->current_cylinder <= 0) {
-			fdc->current_cylinder = 0;
-			fdc->motor_steps = 0;
-		}
-		else if (fdc->current_cylinder > 255) {
-			fdc->current_cylinder = 255;
-			fdc->motor_steps = 0;
-		}
-
-		if (dev != NULL)
-			dev->motor_step(fdc->motor_dir);
-	}
-
-	fdc->update_ST3();
-	if (fdc->motor_steps != 0) {
-		/* step again */
-		PIC_AddEvent(FDC_MotorStep,fdc->fdc_motor_step_delay,idx);
-	}
-	else {
-		/* done stepping */
-		fdc->data_register_ready = 1;
-		fdc->busy_status = 0;
-		fdc->ST[0] &= 0x1F;
-		if (fdc->current_cylinder == 0) fdc->ST[0] |= 0x20;
-		/* fire IRQ */
-		fdc->raise_irq();
-		/* no result phase */
-		fdc->reset_io();
-
-		/* real FDC's don't have this insight, but for DOSBox-X debugging... */
-		if (dev != NULL && dev->current_track != fdc->current_cylinder)
-			LOG_MSG("FDC: warning, after motor step FDC and drive are out of sync (fdc=%u drive=%u). OS or App needs to recalibrate\n",
-				fdc->current_cylinder,dev->current_track);
-
-//		LOG_MSG("FDC: motor step finished. current=%u\n",fdc->current_cylinder);
-	}
+void IDE_OnReset(Section *sec) {
+	for (size_t i=0;i < MAX_IDE_CONTROLLERS;i++) ide_inits[i](control->GetSection(ide_names[i]));
 }
 
-void FloppyController::on_reset() {
-	/* TODO: cancel DOSBox events corresponding to read/seek/etc */
-	PIC_RemoveSpecificEvents(FDC_MotorStep,interface_index);
-	motor_dir = 0;
-	motor_steps = 0;
-	current_cylinder = 0;
-	busy_status = 0;
-	ST[0] &= 0x3F;
-	reset_io();
-	lower_irq();
-}
-
-FloppyDevice::~FloppyDevice() {
-}
-
-FloppyDevice::FloppyDevice(FloppyController *c) {
-	motor = select = false;
-	current_track = 0;
-	track0 = false;
-}
-
-void FloppyDevice::set_select(bool enable) {
-	select = enable;
-}
-
-void FloppyDevice::set_motor(bool enable) {
-	motor = enable;
-}
-
-void FloppyDevice::motor_step(int dir) {
-	current_track += dir;
-	if (current_track < 0) current_track = 0;
-	if (current_track > 84) current_track = 84;
-	track0 = (current_track == 0);
-}
-
-int FloppyController::drive_selected() {
-	return (digital_output_register & 3);
-}
-
-bool FloppyController::dma_irq_enabled() {
-	return (digital_output_register & 0x08); /* bit 3 of DOR controls DMA/IRQ enable */
-}
-
-static void FDC_Destroy(Section* sec) {
-	for (unsigned int i=0;i < MAX_FLOPPY_CONTROLLERS;i++) {
-		if (floppycontroller[i] != NULL) {
-			delete floppycontroller[i];
-			floppycontroller[i] = NULL;
+void IDE_OnEnterPC98(Section *sec) {
+    /* TODO: Late PC-9801 and PC-9821 have IDE controllers.
+     *       What I'm not familiar with is what I/O ports the IDE controller is mapped at
+     *       and what IRQ is used by IDE.
+     *
+     *       When I better understand the IDE controller I will reenable this code to match it */
+	for (unsigned int i=0;i < MAX_IDE_CONTROLLERS;i++) {
+		if (idecontroller[i] != NULL) {
+			delete idecontroller[i];
+			idecontroller[i] = NULL;
 		}
 	}
 
-	init_floppy = 0;
+	init_ide = 0;
 }
 
-static void FDC_Init(Section* sec,unsigned char interface) {
-	Section_prop *section=static_cast<Section_prop *>(sec);
-	FloppyController *fdc;
+void IDE_Init() {
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing IDE controllers");
 
-	assert(interface < MAX_FLOPPY_CONTROLLERS);
+	AddVMEventFunction(VM_EVENT_RESET,AddVMEventFunctionFuncPair(IDE_OnReset));
 
-	if (!section->Get_bool("enable"))
-		return;
-
-	if (!init_floppy) {
-		sec->AddDestroyFunction(&FDC_Destroy);
-		init_floppy = 1;
-	}
-
-	fdc = floppycontroller[interface] = new FloppyController(sec,interface);
-	fdc->install_io_port();
-
-	PIC_SetIRQMask(fdc->IRQ,false);
+	AddVMEventFunction(VM_EVENT_ENTER_PC98_MODE,AddVMEventFunctionFuncPair(IDE_OnEnterPC98));
 }
 
-void FDC_Primary_Init(Section *sec) {
-	FDC_Init(sec,0);
-}
-
-void FDC_Secondary_Init(Section *sec) {
-	FDC_Init(sec,1);
-}
-
-void FDC_Tertiary_Init(Section *sec) {
-	FDC_Init(sec,2);
-}
-
-void FDC_Quaternary_Init(Section *sec) {
-	FDC_Init(sec,3);
-}
-
-void FDC_Quinternary_Init(Section *sec) {
-	FDC_Init(sec,4);
-}
-
-void FDC_Sexternary_Init(Section *sec) {
-	FDC_Init(sec,5);
-}
-
-void FDC_Septernary_Init(Section *sec) {
-	FDC_Init(sec,6);
-}
-
-void FDC_Octernary_Init(Section *sec) {
-	FDC_Init(sec,7);
-}
-
-void FloppyController::update_ST3() {
-	FloppyDevice *dev = device[drive_selected()&3];
-
-	/* FIXME: Should assemble bits from FloppyDevice objects and their boolean "signal" variables */
-	ST[3] =
-		0x20/*RDY*/ +
-		0x08/*DOUBLE-SIDED SIGNAL*/+
-		(drive_selected()&3);/*DRIVE SELECT*/
-
-	if (dev != NULL)
-		ST[3] |= (dev->track0 ? 0x10 : 0)/*TRACK 0 signal from device*/;
-}
-
-void FloppyController::reset_io() {
-	reset_cmd();
-	reset_res();
-	busy_status=0;
-	data_read_expected=0;
-}
-
-void FloppyController::reset_cmd() {
-	in_cmd_len=0;
-	in_cmd_pos=0;
-	in_cmd_state=false;
-}
-
-void FloppyController::reset_res() {
-	out_res_len=0;
-	out_res_pos=0;
-	out_res_state=false;
-}
-
-FloppyController::FloppyController(Section* configuration,unsigned char index):Module_base(configuration){
-	Section_prop * section=static_cast<Section_prop *>(configuration);
-	bool register_pnp = false;
-	int i;
-
-	fdc_motor_step_delay = 400.0f / 80; /* FIXME: Based on 400ms seek time from track 0 to 80 */
-	interface_index = index;
-	data_register_ready = 1;
-	data_read_expected = 0;
-	non_dma_mode = 0;
-	busy_status = 0;
-	for (i=0;i < 4;i++) positioning[i] = false;
-	for (i=0;i < 4;i++) ST[i] = 0x00;
-	reset_io();
-
-	digital_output_register = 0;
-	device[0] = NULL;
-	device[1] = NULL;
-	device[2] = NULL;
-	device[3] = NULL;
-	base_io = 0;
-	IRQ = -1;
-	DMA = -1;
-
-	update_ST3();
-
-	int13fakev86io = section->Get_bool("int13fakev86io");
-	instant_mode = section->Get_bool("instant mode");
-	register_pnp = section->Get_bool("pnp");
-
-	i = section->Get_int("irq");
-	if (i > 0 && i <= 15) IRQ = i;
-
-	i = section->Get_int("dma");
-	if (i >= 0 && i <= 15) DMA = i;
-
-	i = section->Get_hex("io");
-	if (i >= 0x100 && i <= 0x3FF) base_io = i & ~7;
-
-	if (IRQ < 0) IRQ = 6;
-	if (DMA < 0) DMA = 2;
-
-	dma = GetDMAChannel(DMA);
-
-	if (base_io == 0) {
-		if (index == 0) base_io = 0x3F0;
-	}
-	else if (base_io == 1) {
-		if (index == 0) base_io = 0x370;
-	}
-
-	if (register_pnp && base_io > 0) {
-		unsigned char tmp[256];
-		unsigned int i;
-
-		const unsigned char h1[9] = {
-			ISAPNP_SYSDEV_HEADER(
-				ISAPNP_ID('P','N','P',0x0,0x7,0x0,0x0), /* PNP0700 Generic floppy controller */
-				ISAPNP_TYPE(0x01,0x02,0x00),		/* type: Mass Storage Device / Floppy / Generic */
-				0x0001 | 0x0002)
-		};
-
-		i = 0;
-		memcpy(tmp+i,h1,9); i += 9;			/* can't disable, can't configure */
-		/*----------allocated--------*/
-		tmp[i+0] = (8 << 3) | 7;			/* IO resource */
-		tmp[i+1] = 0x01;				/* 16-bit decode */
-		host_writew(tmp+i+2,base_io);			/* min */
-		host_writew(tmp+i+4,base_io);			/* max */
-		tmp[i+6] = 0x08;				/* align */
-		tmp[i+7] = 0x06;				/* length (FIXME: Emit as 7 unless we know IDE interface will not conflict) */
-		i += 7+1;
-
-		tmp[i+0] = (8 << 3) | 7;			/* IO resource (FIXME: Don't emit this if we know IDE interface will take port 0x3F7) */
-		tmp[i+1] = 0x01;				/* 16-bit decode */
-		host_writew(tmp+i+2,base_io+7);			/* min */
-		host_writew(tmp+i+4,base_io+7);			/* max */
-		tmp[i+6] = 0x01;				/* align */
-		tmp[i+7] = 0x01;				/* length */
-		i += 7+1;
-
-		if (IRQ > 0) {
-			tmp[i+0] = (4 << 3) | 3;		/* IRQ resource */
-			host_writew(tmp+i+1,1 << IRQ);
-			tmp[i+3] = 0x09;			/* HTE=1 LTL=1 */
-			i += 3+1;
-		}
-
-		if (DMA >= 0) {
-			tmp[i+0] = (5 << 3) | 2;		/* IRQ resource */
-			tmp[i+1] = 1 << DMA;
-			tmp[i+2] = 0x00;			/* 8-bit */
-			i += 2+1;
-		}
-
-		tmp[i+0] = 0x79;				/* END TAG */
-		tmp[i+1] = 0x00;
-		i += 2;
-		/*-------------possible-----------*/
-		tmp[i+0] = 0x79;				/* END TAG */
-		tmp[i+1] = 0x00;
-		i += 2;
-		/*-------------compatible---------*/
-		tmp[i+0] = 0x79;				/* END TAG */
-		tmp[i+1] = 0x00;
-		i += 2;
-
-		if (!ISAPNP_RegisterSysDev(tmp,i))
-			LOG_MSG("ISAPNP register failed\n");
-	}
-}
-
-void FloppyController::install_io_port(){
-	unsigned int i;
-
-	if (base_io != 0) {
-		LOG_MSG("FDC installing to io=%03xh IRQ=%d DMA=%d\n",base_io,IRQ,DMA);
-		for (i=0;i < 8;i++) {
-			if (i != 6) { /* does not use port 0x3F6 */
-				WriteHandler[i].Install(base_io+i,fdc_baseio_w,IO_MA);
-				ReadHandler[i].Install(base_io+i,fdc_baseio_r,IO_MA);
-			}
-		}
-	}
-}
-
-FloppyController::~FloppyController() {
-	unsigned int i;
-
-	for (i=0;i < 4;i++) {
-		if (device[i] != NULL) {
-			delete device[i];
-			device[i] = NULL;
-		}
-	}
-}
-
-FloppyController *match_fdc_controller(Bitu port) {
-	unsigned int i;
-
-	for (i=0;i < MAX_FLOPPY_CONTROLLERS;i++) {
-		FloppyController *fdc = floppycontroller[i];
-		if (fdc == NULL) continue;
-		if (fdc->base_io != 0U && fdc->base_io == (port&0xFFF8U)) return fdc;
-	}
-
-	return NULL;
-}
-
-/* when DOR port is written */
-void FloppyController::on_dor_change(unsigned char b) {
-	unsigned char chg = b ^ digital_output_register;
-	unsigned int i;
-
-	/* !RESET line */
-	if (chg & 0x04) {
-		if (!(b&0x04)) { /* if bit 2 == 0 s/w is resetting the controller */
-			LOG_MSG("FDC: Reset\n");
-			on_reset();
-		}
-		else {
-			LOG_MSG("FDC: Reset complete\n");
-			/* resetting the FDC on real hardware apparently fires another IRQ */
-			raise_irq();
-		}
-	}
-
-	/* drive select */
-	if (chg & 0x03) {
-		int o,n;
-
-		o = drive_selected();
-		n = b & 3;
-		if (o >= 0) {
-			LOG_MSG("FDC: Drive select from %c to %c\n",o+'A',n+'A');
-			if (device[o] != NULL) device[o]->set_select(false);
-			if (device[n] != NULL) device[n]->set_select(true);
-			update_ST3();
-		}
-	}
-
-	/* DMA/IRQ enable */
-	if (chg & 0x08 && IRQ >= 0) {
-		if ((b&0x08) && irq_pending) PIC_ActivateIRQ(IRQ);
-		else PIC_DeActivateIRQ(IRQ);
-	}
-
-	/* drive motors */
-	if (chg & 0xF0) {
-		LOG_MSG("FDC: Motor control {A,B,C,D} = {%u,%u,%u,%u}\n",
-			(b>>7)&1,(b>>6)&1,(b>>5)&1,(b>>4)&1);
-
-		for (i=0;i < 4;i++) {
-			if (device[i] != NULL) device[i]->set_motor((b&(0x10<<i))?true:false);
-		}
-	}
-
-	digital_output_register = b;
-}
-
-/* IDE code needs to know if port 3F7 will be taken by FDC emulation */
-bool fdc_takes_port_3F7() {
-	return (match_fdc_controller(0x3F7) != NULL);
-}
-
-void FloppyController::prepare_res_phase(uint8_t len) {
-	data_read_expected = 1;
-	out_res_pos = 0;
-	out_res_len = len;
-	out_res_state = true;
-}
-
-void FloppyController::invalid_command_code() {
-	reset_res();
-	prepare_res_phase(1);
-	out_res[0] = ST[0] = 0x80;
-}
-
-uint8_t FloppyController::fdc_data_read() {
-	if (busy_status) {
-		if (out_res_state) {
-			if (out_res_pos < out_res_len) {
-				uint8_t b = out_res[out_res_pos++];
-				if (out_res_pos >= out_res_len) reset_io();
-				return b;
-			}
-			else {
-				reset_io();
-			}
-		}
-		else {
-			reset_io();
-		}
-	}
-
-	return 0xFF;
-}
-
-void FloppyController::on_fdc_in_command() {
-	in_cmd_state = false;
-
-	LOG_MSG("FDC: Command len=%u %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-		in_cmd_len,
-		in_cmd[0],in_cmd[1],in_cmd[2],in_cmd[3],in_cmd[4],
-		in_cmd[5],in_cmd[6],in_cmd[7],in_cmd[8],in_cmd[9]);
-
-	switch (in_cmd[0]&0x1F) {
-		case 0x04: /* Check Drive Status */
-			/*     |   7    6    5    4    3    2    1    0
-			 * ----+------------------------------------------
-			 *   0 |               Register ST3
-			 * -----------------------------------------------
-			 *   1     total
-			 */
-			reset_res();
-			prepare_res_phase(1);
-			out_res[0] = ST[3];
-			ST[0] = 0x00 | drive_selected();
-			break;
-		case 0x07: /* Calibrate drive */
-			ST[0] = 0x20 | drive_selected();
-			if (instant_mode) {
-				/* move head to track 0 */
-				current_cylinder = 0;
-				/* fire IRQ */
-				raise_irq();
-				/* no result phase */
-				reset_io();
-			}
-			else {
-				/* delay due to stepping the head to the desired cylinder */
-				motor_steps = current_cylinder; /* always to track 0 */
-				if (motor_steps > 79) motor_steps = 79; /* calibrate is said to max out at 79 */
-				motor_dir = -1; /* always step backwards */
-
-				/* the command takes time to move the head */
-				data_register_ready = 0;
-				busy_status = 1;
-
-				/* and make it happen */
-				PIC_AddEvent(FDC_MotorStep,(motor_steps > 0 ? fdc_motor_step_delay : 0.1)/*ms*/,interface_index);
-
-				/* return now */
-				return;
-			}
-			break;
-		case 0x08: /* Check Interrupt Status */
-			/*     |   7    6    5    4    3    2    1    0
-			 * ----+------------------------------------------
-			 *   0 |               Register ST0
-			 *   1 |              Current Cylinder
-			 * -----------------------------------------------
-			 *   2     total
-			 */
-			if (irq_pending) {
-				lower_irq(); /* doesn't cause IRQ, clears IRQ */
-				reset_res();
-				prepare_res_phase(2);
-				out_res[0] = ST[0];
-				out_res[1] = current_cylinder;
-			}
-			else {
-				/* if no pending IRQ, signal error.
-				 * this is considered standard floppy controller behavior.
-				 * this also fixes an issue where Windows 3.1 QIC tape backup software like Norton Backup (Norton Desktop 3.0)
-				 * will "hang" Windows 3.1 polling the FDC in an endless loop if we don't return this error to say that no
-				 * more IRQs are pending. */
-				reset_res();
-				ST[0] = (ST[0] & 0x3F) | 0x80;
-				out_res[0] = ST[0];
-				prepare_res_phase(1);
-			}
-			break;
-		case 0x0F: /* Seek Head */
-			ST[0] = 0x00 | drive_selected();
-			if (instant_mode) {
-				/* move head to whatever track was wanted */
-				current_cylinder = in_cmd[2]; /* from 3rd byte of command */
-				/* fire IRQ */
-				raise_irq();
-				/* no result phase */
-				reset_io();
-			}
-			else {
-				/* delay due to stepping the head to the desired cylinder */
-				motor_steps = abs(in_cmd[2] - current_cylinder);
-				motor_dir = in_cmd[2] > current_cylinder ? 1 : -1;
-
-				/* the command takes time to move the head */
-				data_register_ready = 0;
-				busy_status = 1;
-
-				/* and make it happen */
-				PIC_AddEvent(FDC_MotorStep,(motor_steps > 0 ? fdc_motor_step_delay : 0.1)/*ms*/,interface_index);
-
-				/* return now */
-				return;
-			}
-			break;
-		default:
-			LOG_MSG("FDC: Unknown command %02xh (somehow passed first check)\n",in_cmd[0]);
-			reset_io();
-			break;
-	};
-
-	LOG_MSG("FDC: Response len=%u %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-		out_res_len,
-		out_res[0],out_res[1],out_res[2],out_res[3],out_res[4],
-		out_res[5],out_res[6],out_res[7],out_res[8],out_res[9]);
-}
-
-void FloppyController::fdc_data_write(uint8_t b) {
-	if (!busy_status) {
-		/* we're starting another command */
-		reset_io();
-		in_cmd[0] = b;
-		in_cmd_len = 1;
-		in_cmd_pos = 1;
-		busy_status = true;
-		in_cmd_state = true;
-
-		/* right away.. how long is the command going to be? */
-		switch (in_cmd[0]&0x1F) {
-			case 0x04: /* Check Drive Status */
-				/*     |   7    6    5    4    3    2    1    0
-				 * ----+------------------------------------------
-				 *   0 |   0    0    0    0    0    1    0    0
-				 *   1 |   x    x    x    x    x   HD  DR1  DR0
-				 * -----------------------------------------------
-				 *   2     total
-				 */
-				in_cmd_len = 2;
-				break;
-			case 0x07: /* Calibrate drive (move head to track 0) */
-				/*     |   7    6    5    4    3    2    1    0
-				 * ----+------------------------------------------
-				 *   0 |   0    0    0    0    0    1    1    1
-				 *   1 |   x    x    x    x    x    0  DR1  DR0
-				 * -----------------------------------------------
-				 *   2     total
-				 */
-				in_cmd_len = 2;
-				break;
-			case 0x08: /* Check Interrupt Status */
-				/*     |   7    6    5    4    3    2    1    0
-				 * ----+------------------------------------------
-				 *   0 |   0    0    0    0    1    0    0    0
-				 * -----------------------------------------------
-				 *   1     total
-				 */
-				break;
-			case 0x0F: /* Seek Head */
-				/*     |   7    6    5    4    3    2    1    0
-				 * ----+------------------------------------------
-				 *   0 |   0    0    0    0    1    1    1    1
-				 *   1 |   x    x    x    x    x   HD  DR1  DR0
-				 *   2 |                Cylinder
-				 * -----------------------------------------------
-				 *   3     total
-				 */
-				if (in_cmd[0]&0x80) { /* Reject Seek Relative (1xfh) most FDC's I've tested don't support it */
-					LOG_MSG("FDC: Seek Relative not supported\n");
-					/* give Invalid Command Code 0x80 as response */
-					invalid_command_code();
-					reset_cmd();
-				}
-				else {
-					in_cmd_len = 3;
-				}
-				break;
-			default:
-				LOG_MSG("FDC: Unknown command (first byte %02xh)\n",in_cmd[0]);
-				/* give Invalid Command Code 0x80 as response */
-				invalid_command_code();
-				reset_cmd();
-				break;
-		};
-
-		if (in_cmd_state && in_cmd_pos >= in_cmd_len)
-			on_fdc_in_command();
-	}
-	else if (in_cmd_state) {
-		if (in_cmd_pos < in_cmd_len)
-			in_cmd[in_cmd_pos++] = b;
-
-		if (in_cmd_pos >= in_cmd_len)
-			on_fdc_in_command();
-	}
-	else {
-		LOG_MSG("FDC: Unknown state!\n");
-		on_reset();
-	}
-}
-
-static void fdc_baseio_w(Bitu port,Bitu val,Bitu iolen) {
-	FloppyController *fdc = match_fdc_controller(port);
-	if (fdc == NULL) {
-		LOG_MSG("WARNING: port read from I/O port not registered to FDC, yet callback triggered\n");
-		return;
-	}
-
-//	LOG_MSG("FDC: Write port 0x%03x data 0x%02x irq_at_time=%u\n",port,val,fdc->irq_pending);
-
-	if (iolen > 1) {
-		LOG_MSG("WARNING: FDC unusual port write %03xh val=%02xh len=%u, port I/O should be 8-bit\n",port,val,iolen);
-	}
-
-	switch (port&7) {
-		case 2: /* digital output port */
-			fdc->on_dor_change(val&0xFF);
-			break;
-		case 5: /* data */
-			if (!fdc->data_register_ready) {
-				LOG_MSG("WARNING: FDC data write when data port not ready\n");
-			}
-			else if (fdc->data_read_expected) {
-				LOG_MSG("WARNING: FDC data write when data port ready but expecting I/O read\n");
-			}
-			else {
-				fdc->fdc_data_write(val&0xFF);
-			}
-			break;
-		default:
-			LOG_MSG("DEBUG: FDC write port %03xh val %02xh len=%u\n",port,val,iolen);
-			break;
-	};
-}
-
-static Bitu fdc_baseio_r(Bitu port,Bitu iolen) {
-	FloppyController *fdc = match_fdc_controller(port);
-	unsigned char b;
-
-	if (fdc == NULL) {
-		LOG_MSG("WARNING: port read from I/O port not registered to FDC, yet callback triggered\n");
-		return ~(0UL);
-	}
-
-//	LOG_MSG("FDC: Read port 0x%03x irq_at_time=%u\n",port,fdc->irq_pending);
-
-	if (iolen > 1) {
-		LOG_MSG("WARNING: FDC unusual port read %03xh len=%u, port I/O should be 8-bit\n",port,iolen);
-	}
-
-	switch (port&7) {
-		case 4: /* main status */
-			b =	(fdc->data_register_ready ? 0x80 : 0x00) +
-				(fdc->data_read_expected ? 0x40 : 0x00) +
-				(fdc->non_dma_mode ? 0x20 : 0x00) +
-				(fdc->busy_status ? 0x10 : 0x00) +
-				(fdc->positioning[3] ? 0x08 : 0x00) +
-				(fdc->positioning[2] ? 0x04 : 0x00) +
-				(fdc->positioning[1] ? 0x02 : 0x00) +
-				(fdc->positioning[0] ? 0x01 : 0x00);
-//			LOG_MSG("FDC: read status 0x%02x\n",b);
-			return b;
-		case 5: /* data */
-			if (!fdc->data_register_ready) {
-				LOG_MSG("WARNING: FDC data read when data port not ready\n");
-				return ~(0UL);
-			}
-			else if (!fdc->data_read_expected) {
-				LOG_MSG("WARNING: FDC data read when data port ready but expecting I/O write\n");
-				return ~(0UL);
-			}
-
-			b = fdc->fdc_data_read();
-//			LOG_MSG("FDC: read data 0x%02x\n",b);
-			return b;
-		default:
-			LOG_MSG("DEBUG: FDC read port %03xh len=%u\n",port,iolen);
-			break;
-	};
-
-	return ~(0UL);
-}
-
-void FloppyController::raise_irq() {
-	irq_pending = true;
-	if (dma_irq_enabled() && IRQ >= 0) PIC_ActivateIRQ(IRQ);
-}
-
-void FloppyController::lower_irq() {
-	irq_pending = false;
-	if (IRQ >= 0) PIC_DeActivateIRQ(IRQ);
+void BIOS_Post_register_IDE() {
+	for (size_t i=0;i < MAX_IDE_CONTROLLERS;i++) {
+        if (idecontroller[i] != NULL)
+            idecontroller[i]->register_isapnp();
+    }
 }
 

@@ -30,7 +30,6 @@
 #include "cross.h"
 #include "hardware.h"
 #include "support.h"
-#include "../save_state.h"
 
 #include "render_scalers.h"
 #if defined(__SSE__)
@@ -39,6 +38,7 @@
 #endif
 
 Render_t render;
+Bitu last_gfx_flags = 0;
 ScalerLineHandler_t RENDER_DrawLine;
 
 void RENDER_CallBack( GFX_CallBackFunctions_t function );
@@ -90,7 +90,24 @@ static void Check_Palette(void) {
 	render.pal.last=0;
 }
 
+uint32_t GFX_palette32bpp[256] = {0};
+
+unsigned int GFX_GetBShift();
+
 void RENDER_SetPal(Bit8u entry,Bit8u red,Bit8u green,Bit8u blue) {
+	if (GFX_GetBShift() == 0) {
+		GFX_palette32bpp[entry] =
+			((uint32_t)red << (uint32_t)16) +
+			((uint32_t)green << (uint32_t)8) +
+			((uint32_t)blue << (uint32_t)0);
+	}
+	else {
+		GFX_palette32bpp[entry] =
+			((uint32_t)blue << (uint32_t)16) +
+			((uint32_t)green << (uint32_t)8) +
+			((uint32_t)red << (uint32_t)0);
+	}
+
 	render.pal.rgb[entry].red=red;
 	render.pal.rgb[entry].green=green;
 	render.pal.rgb[entry].blue=blue;
@@ -169,7 +186,6 @@ static void RENDER_ClearCacheHandler(const void * src) {
 }
 
 extern void GFX_SetTitle(Bit32s cycles,Bits frameskip,Bits timing,bool paused);
-extern void VGA_TweakUserVsyncOffset(float val);
 
 bool RENDER_StartUpdate(void) {
 	if (GCC_UNLIKELY(render.updating))
@@ -227,6 +243,9 @@ static void RENDER_Halt( void ) {
 }
 
 extern Bitu PIC_Ticks;
+extern bool pause_on_vsync;
+void PauseDOSBox(bool pressed);
+
 void RENDER_EndUpdate( bool abort ) {
 	if (GCC_UNLIKELY(!render.updating))
 		return;
@@ -262,6 +281,11 @@ void RENDER_EndUpdate( bool abort ) {
 	}
 	render.frameskip.index = (render.frameskip.index + 1) & (RENDER_SKIP_CACHE - 1);
 	render.updating=false;
+
+	if (pause_on_vsync) {
+		pause_on_vsync = false;
+		PauseDOSBox(true);
+	}
 }
 
 static Bitu MakeAspectTable(Bitu skip,Bitu height,double scaley,Bitu miny) {
@@ -287,7 +311,7 @@ static Bitu MakeAspectTable(Bitu skip,Bitu height,double scaley,Bitu miny) {
 }
 
 
-static void RENDER_Reset( void ) {
+void RENDER_Reset( void ) {
 	Bitu width=render.src.width;
 	Bitu height=render.src.height;
 	bool dblw=render.src.dblw;
@@ -449,7 +473,9 @@ forcenormal:
 			gfx_flags |= GFX_LOVE_32;
 			break;
 	}
+#if !defined(C_SDL2)
 	gfx_flags=GFX_GetBestMode(gfx_flags);
+#endif
 	if (!gfx_flags) {
 		if (!complexBlock && simpleBlock == &ScaleNormal1x) 
 			E_Exit("Failed to create a rendering output");
@@ -507,7 +533,7 @@ forcenormal:
 	}
 /* Setup the scaler variables */
 	gfx_flags=GFX_SetSize(width,height,gfx_flags,gfx_scalew,gfx_scaleh,&RENDER_CallBack);
-	if (gfx_flags & GFX_CAN_8)
+    if (gfx_flags & GFX_CAN_8)
 		render.scale.outMode = scalerMode8;
 	else if (gfx_flags & GFX_CAN_15)
 		render.scale.outMode = scalerMode15;
@@ -589,6 +615,8 @@ forcenormal:
 	/* Signal the next frame to first reinit the cache */
 	render.scale.clearCache = true;
 	render.active=true;
+
+    last_gfx_flags = gfx_flags;
 }
 
 void RENDER_CallBack( GFX_CallBackFunctions_t function ) {
@@ -625,10 +653,10 @@ void RENDER_SetSize(Bitu width,Bitu height,Bitu bpp,float fps,double scrn_ratio)
 	} else if(!dblw && !dblh && (width < 370) && (height < 280)) {
 		dblw=true; dblh=true;
 	}
-	//LOG_MSG("pixratio %1.3f, dw %s, dh %s",ratio,dblw?"true":"false",dblh?"true":"false");
+	LOG_MSG("pixratio %1.3f, dw %s, dh %s",ratio,dblw?"true":"false",dblh?"true":"false");
 
 	if ( ratio > 1.0 ) {
-		double target = height * ratio + 0.025;
+		double target = height * ratio + 0.1;
 		ratio = target / height;
 	} else {
 		//This would alter the width of the screen, we don't care about rounding errors here
@@ -649,7 +677,7 @@ static void IncreaseFrameSkip(bool pressed) {
 	if (!pressed)
 		return;
 	if (render.frameskip.max<10) render.frameskip.max++;
-	LOG_MSG("Frame Skip at %d",render.frameskip.max);
+	LOG_MSG("Frame Skip at %d",(int)render.frameskip.max);
 	GFX_SetTitle(-1,render.frameskip.max,-1,false);
 }
 
@@ -657,7 +685,7 @@ static void DecreaseFrameSkip(bool pressed) {
 	if (!pressed)
 		return;
 	if (render.frameskip.max>0) render.frameskip.max--;
-	LOG_MSG("Frame Skip at %d",render.frameskip.max);
+	LOG_MSG("Frame Skip at %d",(int)render.frameskip.max);
 	GFX_SetTitle(-1,render.frameskip.max,-1,false);
 }
 /* Disabled as I don't want to waste a keybind for that. Might be used in the future (Qbix)
@@ -687,8 +715,25 @@ void RENDER_SetForceUpdate(bool f) {
 	render.forceUpdate = f;
 }
 
-void RENDER_Init(Section * sec) {
-	Section_prop * section=static_cast<Section_prop *>(sec);
+void RENDER_OnSectionPropChange(Section *x) {
+	Section_prop * section = static_cast<Section_prop *>(control->GetSection("render"));
+
+	bool p_aspect = render.aspect;
+
+	render.aspect = section->Get_bool("aspect");
+	render.frameskip.max = section->Get_int("frameskip");
+
+	if (render.aspect != p_aspect) {
+		RENDER_CallBack(GFX_CallBackReset);
+	}
+}
+
+void RENDER_Init() {
+	Section_prop * section=static_cast<Section_prop *>(control->GetSection("render"));
+
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing renderer");
+
+	control->GetSection("render")->onpropchange.push_back(&RENDER_OnSectionPropChange);
 
 	vga.draw.doublescan_set=section->Get_bool("doublescan");
 	vga.draw.char9_set=section->Get_bool("char9");
@@ -699,6 +744,9 @@ void RENDER_Init(Section * sec) {
 	Bitu scalersize = render.scale.size;
 	bool scalerforced = render.scale.forced;
 	scalerOperation_t scaleOp = render.scale.op;
+
+    render.scale.cacheRead = NULL;
+    render.scale.outWrite = NULL;
 
 	render.pal.first=0;
 	render.pal.last=255;
@@ -726,17 +774,7 @@ void RENDER_Init(Section * sec) {
 	render.scale.forced = false;
 	if(f == "forced") render.scale.forced = true;
    
-#if (xBRZ_w_TBB)
-	render.xbrz_using=false;
-#endif
 	if (scaler == "none") { render.scale.op = scalerOpNormal; render.scale.size = 1; render.scale.hardware=false; }
-#if (xBRZ_w_TBB)
-	else if (scaler == "xbrz") {
-		render.xbrz_using=true;
-		render.scale.op = scalerOpNormal;render.scale.size = 1;
-		LOG_MSG("To enable xBRZ scaler, set output to surface and fullscreen to true.");
-	}
-#endif
 	else if (scaler == "normal2x") { render.scale.op = scalerOpNormal; render.scale.size = 2; render.scale.hardware=false; }
 	else if (scaler == "normal3x") { render.scale.op = scalerOpNormal; render.scale.size = 3; render.scale.hardware=false; }
 	else if (scaler == "normal4x") { render.scale.op = scalerOpNormal; render.scale.size = 4; render.scale.hardware=false; }
@@ -782,137 +820,7 @@ void RENDER_Init(Section * sec) {
 
 	MAPPER_AddHandler(DecreaseFrameSkip,MK_f7,MMOD1,"decfskip","Dec Fskip");
 	MAPPER_AddHandler(IncreaseFrameSkip,MK_f8,MMOD1,"incfskip","Inc Fskip");
-	VGA_TweakUserVsyncOffset(0.0f);
 
 	GFX_SetTitle(-1,render.frameskip.max,-1,false);
 }
 
-
-
-//save state support
-namespace
-{
-class SerializeRender : public SerializeGlobalPOD
-{
-public:
-	SerializeRender() : SerializeGlobalPOD("Render")
-	{}
-
-private:
-	virtual void getBytes(std::ostream& stream)
-	{
-		SerializeGlobalPOD::getBytes(stream);
-
-
-		// - pure data
-		WRITE_POD( &render.src, render.src );
-
-		WRITE_POD( &render.pal, render.pal );
-		WRITE_POD( &render.updating, render.updating );
-		WRITE_POD( &render.active, render.active );
-		WRITE_POD( &render.fullFrame, render.fullFrame );
-	}
-
-	virtual void setBytes(std::istream& stream)
-	{
-		SerializeGlobalPOD::setBytes(stream);
-
-
-		// - pure data
-		READ_POD( &render.src, render.src );
-
-		READ_POD( &render.pal, render.pal );
-		READ_POD( &render.updating, render.updating );
-		READ_POD( &render.active, render.active );
-		READ_POD( &render.fullFrame, render.fullFrame );
-
-		//***************************************
-		//***************************************
-
-		// reset screen
-		memset( &render.frameskip, 0, sizeof(render.frameskip) );
-
-		render.scale.clearCache = true;
-		if( render.scale.outWrite ) { GFX_EndUpdate(NULL); }
-
-
-		RENDER_SetSize( render.src.width, render.src.height, render.src.bpp, render.src.fps, render.src.scrn_ratio );
-	}
-} dummy;
-}
-
-
-
-/*
-ykhwong svn-daum 2012-02-20
-
-
-globals:
-Render_t render;
-
-// - pure data
-	struct {
-		Bitu width, start;
-		Bitu height;
-		Bitu bpp;
-		bool dblw,dblh;
-		double ratio;
-		float fps;
-	} src;
-
-// - system data (reset this?)
-	struct {
-		Bitu count;
-		Bitu max;
-		Bitu index;
-		Bit8u hadSkip[RENDER_SKIP_CACHE];
-	} frameskip;
-
-// - system data (reset as needed)
-	struct {
-		Bitu size;
-		scalerMode_t inMode;
-		scalerMode_t outMode;
-		scalerOperation_t op;
-		bool clearCache;
-		bool forced;
-		ScalerLineHandler_t lineHandler;
-		ScalerLineHandler_t linePalHandler;
-		ScalerComplexHandler_t complexHandler;
-		Bitu blocks, lastBlock;
-		Bitu outPitch;
-		Bit8u *outWrite;
-		Bitu cachePitch;
-		Bit8u *cacheRead;
-		Bitu inHeight, inLine, outLine;
-	} scale;
-
-// - pure data
-	RenderPal_t pal;
-	bool updating;
-	bool active;
-	bool aspect;
-	bool fullFrame;
-
-
-typedef struct RenderPal_t {
-	struct { 
-		Bit8u red;
-		Bit8u green;
-		Bit8u blue;
-		Bit8u unused;
-	} rgb[256];
-	union {
-		Bit16u b16[256];
-		Bit32u b32[256];
-	} lut;
-	bool changed;
-	Bit8u modified[256];
-	Bitu first;
-	Bitu last;
-
-
-
-// - system function ptr
-ScalerLineHandler_t RENDER_DrawLine;
-*/

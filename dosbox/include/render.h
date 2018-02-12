@@ -30,7 +30,6 @@
 #define RENDER_SKIP_CACHE	16
 //Enable this for scalers to support 0 input for empty lines
 //#define RENDER_NULL_INPUT
-#define xBRZ_w_TBB 1
 
 typedef struct {
 	struct { 
@@ -90,12 +89,10 @@ typedef struct {
 	bool fullFrame;
 	bool forceUpdate;
 	bool autofit;
-#if defined (xBRZ_w_TBB)
-	bool xbrz_using;
-#endif
 } Render_t;
 
 extern Render_t render;
+extern Bitu last_gfx_flags;
 extern ScalerLineHandler_t RENDER_DrawLine;
 void RENDER_SetSize(Bitu width,Bitu height,Bitu bpp,float fps,double scrn_ratio);
 bool RENDER_StartUpdate(void);

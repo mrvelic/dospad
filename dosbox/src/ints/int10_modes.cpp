@@ -116,7 +116,7 @@ VideoModeBlock ModeList_VGA[]={
 { 0x210  ,M_LIN32  ,320 ,200 ,40 ,25 ,8 ,8  ,1 ,0xA0000 ,0x10000,50  ,449 ,40 ,400 , _DOUBLESCAN },
 { 0x211  ,M_LIN32  ,640 ,480 ,80 ,30 ,8 ,16 ,1 ,0xA0000 ,0x10000,100 ,525 ,80 ,480 ,0   },
 { 0x212  ,M_LIN32  ,800 ,600 ,100,37 ,8 ,16 ,1 ,0xA0000 ,0x10000,132 ,628 ,100,600 ,0   },
-{ 0x213  ,M_LIN32  ,1024,768 ,128,48 ,8 ,16 ,1 ,0xA0000 ,0x10000,168 ,806 ,128,768 ,0	},
+{ 0x214  ,M_LIN32  ,1024,768 ,128,48 ,8 ,16 ,1 ,0xA0000 ,0x10000,168 ,806 ,128,768 ,0	},
 
 /* those should be interlaced but ok */
 { 0x119  ,M_LIN15  ,1280,1024,160,64 ,8 ,16 ,1 ,0xA0000 ,0x10000,424 ,1066,320,1024,0	},
@@ -129,10 +129,13 @@ VideoModeBlock ModeList_VGA[]={
 { 0x120  ,M_LIN8   ,1600,1200,200,75 ,8 ,16 ,1 ,0xA0000 ,0x10000,264 ,1240,200,1200,0	},
 { 0x142  ,M_LIN32  ,640 ,350 ,80 ,25 ,8 ,14 ,2 ,0xA0000 ,0x10000 ,100 ,449 ,80 ,350 ,0	},
 
-{ 0x150  ,M_LIN8   ,320 ,200 ,40 ,25 ,8 ,8  ,1 ,0xA0000 ,0x10000,100 ,449 ,80 ,400 , _S3_PIXEL_DOUBLE | _DOUBLESCAN },
+// FIXME: Find an old S3 Trio and dump the VESA modelist, then arrange this modelist to match
+{ 0x150  ,M_LIN8   ,320 ,480 ,40 ,60 ,8 ,8  ,1 ,0xA0000 ,0x10000,100 ,525 ,80 ,480 , _S3_PIXEL_DOUBLE  },
 { 0x151  ,M_LIN8   ,320 ,240 ,40 ,30 ,8 ,8  ,1 ,0xA0000 ,0x10000,100 ,525 ,80 ,480 , _S3_PIXEL_DOUBLE | _DOUBLESCAN },
 { 0x152  ,M_LIN8   ,320 ,400 ,40 ,50 ,8 ,8  ,1 ,0xA0000 ,0x10000,100 ,449 ,80 ,400 , _S3_PIXEL_DOUBLE  },
-{ 0x153  ,M_LIN8   ,320 ,480 ,40 ,60 ,8 ,8  ,1 ,0xA0000 ,0x10000,100 ,525 ,80 ,480 , _S3_PIXEL_DOUBLE  },
+// For S3 Trio emulation this mode must exist as mode 0x153 else RealTech "Countdown" will crash
+// if you select VGA 320x200 with S3 acceleration.
+{ 0x153  ,M_LIN8   ,320 ,200 ,40 ,25 ,8 ,8  ,1 ,0xA0000 ,0x10000,100 ,449 ,80 ,400 , _S3_PIXEL_DOUBLE | _DOUBLESCAN },
 
 { 0x160  ,M_LIN15  ,320 ,240 ,40 ,30 ,8 ,8  ,1 ,0xA0000 ,0x10000,100 ,525 , 80 ,480 , _DOUBLESCAN },
 { 0x161  ,M_LIN15  ,320 ,400 ,40 ,50 ,8 ,8  ,1 ,0xA0000 ,0x10000,100 ,449 , 80 ,400 ,0 },
@@ -226,6 +229,20 @@ VideoModeBlock ModeList_VGA[]={
 { 0x244  ,M_LIN15  ,1920,1080,240,67 ,8 ,16 ,1 ,0xA0000 ,0x10000,528 ,1188,480 ,1080,0  },
 { 0x245  ,M_LIN16  ,1920,1080,240,67 ,8 ,16 ,1 ,0xA0000 ,0x10000,528 ,1188,480 ,1080,0  },
 { 0x246  ,M_LIN32  ,1920,1080,240,67 ,8 ,16 ,1 ,0xA0000 ,0x10000,264 ,1188,240 ,1080,0  },
+
+// 960x720 4:3 modes
+{ 0x247  ,M_LIN4   ,960,720 ,160,45 ,8 ,16 ,1 ,0xA0000 ,0x10000,144 ,792 ,120 ,720 ,0	},
+{ 0x248  ,M_LIN8   ,960,720 ,160,45 ,8 ,16 ,1 ,0xA0000 ,0x10000,144 ,792 ,120 ,720 ,0	},
+{ 0x249  ,M_LIN15  ,960,720 ,160,45 ,8 ,16 ,1 ,0xA0000 ,0x10000,288 ,792 ,240 ,720 ,0  },
+{ 0x24A  ,M_LIN16  ,960,720 ,160,45 ,8 ,16 ,1 ,0xA0000 ,0x10000,288 ,792 ,240 ,720 ,0  },
+{ 0x24B  ,M_LIN32  ,960,720 ,160,45 ,8 ,16 ,1 ,0xA0000 ,0x10000,144 ,792 ,120 ,720 ,0  },
+
+// 1440x1080 16:9 modes
+{ 0x24C  ,M_LIN4   ,1440,1080,240,67 ,8 ,16 ,1 ,0xA0000 ,0x10000,200 ,1188,180 ,1080,0	},
+{ 0x24D  ,M_LIN8   ,1440,1080,240,67 ,8 ,16 ,1 ,0xA0000 ,0x10000,200 ,1188,180 ,1080,0	},
+{ 0x24E  ,M_LIN15  ,1440,1080,240,67 ,8 ,16 ,1 ,0xA0000 ,0x10000,400 ,1188,360 ,1080,0  },
+{ 0x24F  ,M_LIN16  ,1440,1080,240,67 ,8 ,16 ,1 ,0xA0000 ,0x10000,400 ,1188,360 ,1080,0  },
+{ 0x2F0  ,M_LIN32  ,1440,1080,240,67 ,8 ,16 ,1 ,0xA0000 ,0x10000,200 ,1188,180 ,1080,0  },
 
 {0xFFFF  ,M_ERROR  ,0   ,0   ,0  ,0  ,0 ,0  ,0 ,0x00000 ,0x0000 ,0   ,0   ,0  ,0   ,0 	},
 };
@@ -363,7 +380,7 @@ VideoModeBlock ModeList_OTHER[]={
 };
 
 VideoModeBlock Hercules_Mode=
-{ 0x007  ,M_TEXT   ,640 ,350 ,80 ,25 ,8 ,14 ,1 ,0xB0000 ,0x1000 ,97 ,25  ,80 ,25  ,0	};
+{ 0x007  ,M_TEXT   ,640 ,400 ,80 ,25 ,8 ,14 ,1 ,0xB0000 ,0x1000 ,97 ,25  ,80 ,25  ,0	};
 
 static Bit8u text_palette[64][3]=
 {
@@ -468,7 +485,7 @@ static Bit8u vga_palette[248][3]=
   {0x10,0x0b,0x0b},{0x10,0x0c,0x0b},{0x10,0x0d,0x0b},{0x10,0x0f,0x0b},{0x10,0x10,0x0b},{0x0f,0x10,0x0b},{0x0d,0x10,0x0b},{0x0c,0x10,0x0b},
   {0x0b,0x10,0x0b},{0x0b,0x10,0x0c},{0x0b,0x10,0x0d},{0x0b,0x10,0x0f},{0x0b,0x10,0x10},{0x0b,0x0f,0x10},{0x0b,0x0d,0x10},{0x0b,0x0c,0x10}
 };
-VideoModeBlock * CurMode;
+VideoModeBlock * CurMode = NULL;
 
 static bool SetCurMode(VideoModeBlock modeblock[],Bit16u mode) {
 	Bitu i=0;
@@ -493,20 +510,10 @@ static bool SetCurMode(VideoModeBlock modeblock[],Bit16u mode) {
 	return false;
 }
 
-#if defined(WIN32) && !(C_DEBUG)
-bool DISP2_Active(void);
-#endif
 bool INT10_SetCurMode(void) {
 	bool mode_changed=false;
 	Bit16u bios_mode=(Bit16u)real_readb(BIOSMEM_SEG,BIOSMEM_CURRENT_MODE);
-	if (CurMode->mode!=bios_mode) {
-#if defined(WIN32) && !(C_DEBUG)
-		if (bios_mode==7 && DISP2_Active()) {
-			if ((real_readw(BIOSMEM_SEG,BIOSMEM_INITIAL_MODE)&0x30)!=0x30) return false;
-			CurMode=&Hercules_Mode;
-			return true;
-		}
-#endif
+	if (CurMode == NULL || CurMode->mode != bios_mode) {
 		switch (machine) {
 		case MCH_CGA:
 			if (bios_mode<7) mode_changed=SetCurMode(ModeList_OTHER,bios_mode);
@@ -545,6 +552,8 @@ bool INT10_SetCurMode(void) {
 				}
 			}
 			break;
+		default:
+			break;
 		}
 	}
 	return mode_changed;
@@ -554,18 +563,9 @@ static void FinishSetMode(bool clearmem) {
 	/* Clear video memory if needs be */
 	if (clearmem) {
 		switch (CurMode->type) {
-		case M_TANDY16:
-			if ((machine==MCH_PCJR) && (CurMode->mode >= 9)) {
-				// PCJR cannot access the full 32k at 0xb800
-				for (Bit16u ct=0;ct<16*1024;ct++) {
-					// 0x1800 is the last 32k block in 128k, as set in the CRTCPU_PAGE register 
-					real_writew(0x1800,ct*2,0x0000);
-				}
-				break;
-			}
-			// fall-through
 		case M_CGA4:
 		case M_CGA2:
+		case M_TANDY16:
 			for (Bit16u ct=0;ct<16*1024;ct++) {
 				real_writew( 0xb800,ct*2,0x0000);
 			}
@@ -590,6 +590,9 @@ static void FinishSetMode(bool clearmem) {
 		case M_LIN32:
 			/* Hack we just access the memory directly */
 			memset(vga.mem.linear,0,vga.vmemsize);
+			break;
+		default:
+			break;
 		}
 	}
 	/* Setup the BIOS */
@@ -604,11 +607,7 @@ static void FinishSetMode(bool clearmem) {
 	real_writeb(BIOSMEM_SEG,BIOSMEM_SWITCHES,0x09);
 
 	// this is an index into the dcc table:
-#if defined(WIN32) && !(C_DEBUG)
-	if (IS_VGA_ARCH) real_writeb(BIOSMEM_SEG,BIOSMEM_DCC_INDEX,DISP2_Active()?0x0c:0x0b);
-#else
 	if (IS_VGA_ARCH) real_writeb(BIOSMEM_SEG,BIOSMEM_DCC_INDEX,0x0b);
-#endif
 	real_writed(BIOSMEM_SEG,BIOSMEM_VS_POINTER,int10.rom.video_save_pointers);
 
 	// Set cursor shape
@@ -629,6 +628,8 @@ static void FinishSetMode(bool clearmem) {
 		case 16:RealSetVec(0x43,int10.rom.font_16);break;
 		}
 	}
+	/* FIXME */
+	VGA_DAC_UpdateColorPalette();
 	/* Tell mouse resolution change */
 	Mouse_NewVideoMode();
 }
@@ -653,6 +654,8 @@ bool INT10_SetVideoMode_OTHER(Bit16u mode,bool clearmem) {
 		if ((real_readw(BIOSMEM_SEG,BIOSMEM_INITIAL_MODE)&0x30)!=0x30) return false;
 		CurMode=&Hercules_Mode;
 		mode=7; // in case the video parameter table is modified
+		break;
+	default:
 		break;
 	}
 	LOG(LOG_INT10,LOG_NORMAL)("Set Video Mode %X",mode);
@@ -701,6 +704,8 @@ bool INT10_SetVideoMode_OTHER(Bit16u mode,bool clearmem) {
 	case M_TANDY16:
 		if (CurMode->mode!=0x9) scanline=2;
 		else scanline=4;
+		break;
+	default:
 		break;
 	}
 	IO_WriteW(crtc_base,0x09 | (scanline-1) << 8);
@@ -805,6 +810,8 @@ bool INT10_SetVideoMode_OTHER(Bit16u mode,bool clearmem) {
 		INT10_SetColorSelect(1);
 		INT10_SetBackgroundBorder(0);
 		break;
+	default:
+		break;
 	}
 
 	// Check if the program wants us to use a custom mode table
@@ -831,6 +838,7 @@ bool INT10_SetVideoMode_OTHER(Bit16u mode,bool clearmem) {
 	return true;
 }
 
+bool unmask_irq0_on_int10_setmode = true;
 
 bool INT10_SetVideoMode(Bit16u mode) {
 	//LOG_MSG("set mode %x",mode);
@@ -844,19 +852,14 @@ bool INT10_SetVideoMode(Bit16u mode) {
 		clearmem=false;
 		mode-=0x80;
 	}
+
+    if (unmask_irq0_on_int10_setmode) {
+        /* setting the video mode unmasks certain IRQs as a matter of course */
+        PIC_SetIRQMask(0,false); /* Enable system timer */
+    }
+
 	int10.vesa_setmode=0xffff;
 	LOG(LOG_INT10,LOG_NORMAL)("Set Video Mode %X",mode);
-#if defined(WIN32) && !(C_DEBUG)
-	if (mode==7 && DISP2_Active()) {
-		if ((real_readw(BIOSMEM_SEG,BIOSMEM_INITIAL_MODE)&0x30)!=0x30) return false;
-		CurMode=&Hercules_Mode;
-		FinishSetMode(clearmem);
-		// EGA/VGA inactive
-		if (IS_EGAVGA_ARCH)	real_writeb(BIOSMEM_SEG,BIOSMEM_VIDEO_CTL,(0x68|(clearmem?0:0x80)));
-		INT10_SetCursorShape(0x0b,0x0c);
-		return true;
-	}
-#endif
 	if (!IS_EGAVGA_ARCH) return INT10_SetVideoMode_OTHER(mode,clearmem);
 
 	/* First read mode setup settings from bios area */
@@ -923,6 +926,10 @@ bool INT10_SetVideoMode(Bit16u mode) {
 
 	if ((CurMode->type==M_TEXT) && (CurMode->cwidth==9)) {
 		// 28MHz (16MHz EGA) clock for 9-pixel wide chars
+		misc_output|=0x4;
+	}
+	else if (machine == MCH_EGA && CurMode->vdispend >= 350) {
+		// EGA 350-line modes need the 16MHz dot clock to run at 60Hz
 		misc_output|=0x4;
 	}
 
@@ -993,12 +1000,33 @@ bool INT10_SetVideoMode(Bit16u mode) {
 		seq_data[2]|=0xf;				//Enable all planes for writing
 		seq_data[4]|=0x8;				//Graphics - Chained
 		break;
+	default:
+		break;
 	}
 	for (Bit8u ct=0;ct<SEQ_REGS;ct++) {
 		IO_Write(0x3c4,ct);
 		IO_Write(0x3c5,seq_data[ct]);
 	}
-	vga.config.compatible_chain4 = true; // this may be changed by SVGA chipset emulation
+
+	/* NTS: S3 INT 10 modesetting code below sets this bit anyway when writing CRTC register 0x31.
+	 *      It needs to be done as I/O port write so that Windows 95 can virtualize it properly when
+	 *      we're called to set INT10 mode 3 (from within virtual 8086 mode) when opening a DOS box.
+	 *
+	 *      If we just set it directly, then the generic S3 driver in Windows 95 cannot trap the I/O
+	 *      and prevent our own INT 10h handler from setting the VGA memory mapping into "compatible
+	 *      chain 4" mode, and then any non accelerated drawing from the Windows driver becomes a
+	 *      garbled mess spread out across the screen (due to the weird way that VGA planar memory
+	 *      is "chained" on SVGA chipsets).
+	 *
+	 *      The S3 linear framebuffer isn't affected by VGA chained mode, which is why only the
+	 *      generic S3 driver was affected by this bug, since the generic S3 driver is the one that
+	 *      uses only VGA access (0xA0000-0xAFFFF) and SVGA bank switching while the more specific
+	 *      "S3 Trio32 PCI" driver uses the linear framebuffer.
+	 *
+	 *      But to avoid breaking other SVGA emulation in DOSBox-X, we still set this manually for
+	 *      other VGA/SVGA emulation cases, just not S3 Trio emulation. */
+	if (svgaCard != SVGA_S3Trio)
+		vga.config.compatible_chain4 = true; // this may be changed by SVGA chipset emulation
 
 	if( machine==MCH_AMSTRAD )
 	{
@@ -1158,6 +1186,8 @@ bool INT10_SetVideoMode(Bit16u mode) {
 	case M_LIN32:
 		underline=0x60;			//Seems to enable the every 4th clock on my s3
 		break;
+	default:
+		break;
 	}
 	if (CurMode->vdispend==350) underline=0x0f;
 
@@ -1237,6 +1267,8 @@ bool INT10_SetVideoMode(Bit16u mode) {
 		if (CurMode->special & _VGA_PIXEL_DOUBLE)
 			mode_control |= 0x08;
 		break;
+	default:
+		break;
 	}
 
 	IO_Write(crtc_base,0x17);IO_Write(crtc_base+1,mode_control);
@@ -1309,6 +1341,8 @@ bool INT10_SetVideoMode(Bit16u mode) {
 		break;
 	case M_CGA2:
 		gfx_data[0x6]|=0x0d;		//graphics mode at at 0xb800=0xbfff, chain odd/even disabled
+		break;
+	default:
 		break;
 	}
 	for (Bit8u ct=0;ct<GFX_REGS;ct++) {
@@ -1409,6 +1443,8 @@ att_text16:
 		for (Bit8u ct=0;ct<16;ct++) att_data[ct]=ct;
 		att_data[0x10]=0x41;		//Color Graphics 8-bit
 		break;
+	default:
+		break;
 	}
 	IO_Read(mono_mode ? 0x3ba : 0x3da);
 	if ((modeset_ctl & 8)==0) {
@@ -1488,11 +1524,16 @@ dac_text16:
 				IO_Write(0x3c9,vga_palette[i][2]);
 			}
 			break;
+		default:
+			break;
 		}
 		if (IS_VGA_ARCH) {
 			/* check if gray scale summing is enabled */
 			if (modeset_ctl & 2) INT10_PerformGrayScaleSumming(0,256);
 		}
+        /* make sure the DAC index is reset on modeset */
+		IO_Write(0x3c7,0); /* according to src/hardware/vga_dac.cpp this sets read_index=0 and write_index=1 */
+		IO_Write(0x3c8,0); /* so set write_index=0 */
 	} else {
 		for (Bit8u ct=0x10;ct<ATT_REGS;ct++) {
 			if (ct==0x11) continue;	// skip overscan register
@@ -1532,6 +1573,8 @@ dac_text16:
 	case M_VGA:
 		feature=(feature&~0x30);
 		break;
+	default:
+		break;
 	}
 	// disabled, has to be set in bios.cpp exclusively
 //	real_writeb(BIOSMEM_SEG,BIOSMEM_INITIAL_MODE,feature);
@@ -1556,6 +1599,9 @@ dac_text16:
 
 		IO_Write(0x3c4,0x15);
 		IO_Write(0x3c5,0x03);
+
+		IO_Write(crtc_base,0x45);
+		IO_Write(crtc_base+1,0x00);
 
 		// Accellerator setup 
 		Bitu reg_50=S3_XGA_8BPP;
@@ -1610,7 +1656,14 @@ dac_text16:
 		}
 		IO_Write(crtc_base,0x3a);IO_Write(crtc_base+1,reg_3a);
 		IO_Write(crtc_base,0x31);IO_Write(crtc_base+1,reg_31);	//Enable banked memory and 256k+ access
-		IO_Write(crtc_base,0x58);IO_Write(crtc_base+1,0x3);		//Enable 8 mb of linear addressing
+
+		IO_Write(crtc_base,0x58);
+		if (vga.vmemsize >= (4*1024*1024))
+			IO_Write(crtc_base+1,0x3);		// 4+ MB window
+		else if (vga.vmemsize >= (2*1024*1024))
+			IO_Write(crtc_base+1,0x2);		// 2 MB window
+		else
+			IO_Write(crtc_base+1,0x1);		// 1 MB window
 
 		IO_Write(crtc_base,0x38);IO_Write(crtc_base+1,0x48);	//Register lock 1
 		IO_Write(crtc_base,0x39);IO_Write(crtc_base+1,0xa5);	//Register lock 2
@@ -1630,6 +1683,7 @@ dac_text16:
 	/* Set vga attrib register into defined state */
 	IO_Read(mono_mode ? 0x3ba : 0x3da);
 	IO_Write(0x3c0,0x20);
+	IO_Read(mono_mode ? 0x3ba : 0x3da);
 
 	/* Load text mode font */
 	if (CurMode->type==M_TEXT) {
@@ -1706,6 +1760,8 @@ Bitu VideoModeMemSize(Bitu mode) {
 	case M_TEXT:
 		if (mode >= 0x100 && !allow_vesa_tty) return ~0;
 		return vmodeBlock->twidth*vmodeBlock->theight*2;
+	default:
+		break;
 	}
 	// Return 0 for all other types, those always fit in memory
 	return 0;

@@ -23,7 +23,7 @@
 #include "setup.h"
 #include "mapper.h"
 #include "support.h"
-#include "../save_state.h"
+#include "control.h"
 
 bool WildFileCmp(const char * file, const char * wild) 
 {
@@ -111,6 +111,8 @@ void Set_Label(char const * const input, char * const output, bool cdrom) {
 
 
 DOS_Drive::DOS_Drive() {
+    nocachedir=false;
+    readonly=false;
 	curdir[0]=0;
 	info[0]=0;
 }
@@ -233,10 +235,13 @@ int DriveManager::UnmountDrive(int drive) {
 	return result;
 }
 
+bool drivemanager_init = false;
 bool int13_extensions_enable = true;
 
 void DriveManager::Init(Section* s) {
 	Section_prop * section=static_cast<Section_prop *>(s);
+
+	drivemanager_init = true;
 
 	int13_extensions_enable = section->Get_bool("int 13 extensions");
 	
@@ -250,78 +255,20 @@ void DriveManager::Init(Section* s) {
 //	MAPPER_AddHandler(&CycleDrive, MK_f3, MMOD2, "cycledrive", "Cycle Drv");
 }
 
-void DRIVES_Init(Section* sec) {
-	DriveManager::Init(sec);
+void DRIVES_Startup(Section *s) {
+	if (!drivemanager_init) {
+		LOG(LOG_MISC,LOG_DEBUG)("Initializing drive system");
+		DriveManager::Init(control->GetSection("dos"));
+	}
+}
+
+void DRIVES_Init() {
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing OOS drives");
+
+	// TODO: DOS kernel exit, reset, guest booting handler
 }
 
 char * DOS_Drive::GetBaseDir(void) {
 	return info + 16;
 }
 
-
-
-// save state support
-void DOS_Drive::SaveState( std::ostream& stream )
-{
-	// - pure data
-	WRITE_POD( &curdir, curdir );
-	WRITE_POD( &info, info );
-}
-
-
-void DOS_Drive::LoadState( std::istream& stream )
-{
-	// - pure data
-	READ_POD( &curdir, curdir );
-	READ_POD( &info, info );
-}
-
-
-void DriveManager::SaveState( std::ostream& stream )
-{
-	// - pure data
-	WRITE_POD( &currentDrive, currentDrive );
-}
-
-
-void DriveManager::LoadState( std::istream& stream )
-{
-	// - pure data
-	READ_POD( &currentDrive, currentDrive );
-}
-
-
-void POD_Save_DOS_DriveManager( std::ostream& stream )
-{
-	DriveManager::SaveState(stream);
-}
-
-
-void POD_Load_DOS_DriveManager( std::istream& stream )
-{
-	DriveManager::LoadState(stream);
-}
-
-
-
-/*
-ykhwong svn-daum 2012-05-21
-
-
-class DriveManager
-	// - pure data
-	int currentDrive;
-
-	// - system data
-	static struct DriveInfo {
-		std::vector<DOS_Drive*> disks;
-		Bit32u currentDisk;
-	} driveInfos[DOS_DRIVES];
-
-
-
-class DOS_Drive
-	// - pure data
-	char curdir[DOS_PATHLENGTH];
-	char info[256];
-*/

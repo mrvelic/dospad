@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2002-2015  The DOSBox Team
+ *  Copyright (C) 2002-2013  The DOSBox Team
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -557,7 +557,7 @@ void INT10_SetupBasicVideoParameterTable(void) {
 			break;
 	}
 
-	if (BIOS_VIDEO_TABLE_LOCATION == ~0 || BIOS_VIDEO_TABLE_SIZE != (Bitu)copy_sz) {
+	if (BIOS_VIDEO_TABLE_LOCATION == ~(0U) || BIOS_VIDEO_TABLE_SIZE != (Bitu)copy_sz) {
 		if (rom_bios_vptable_enable) {
 			/* TODO: Free previous block */
 

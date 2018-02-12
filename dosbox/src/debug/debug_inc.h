@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2002-2015  The DOSBox Team
+ *  Copyright (C) 2002-2013  The DOSBox Team
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -19,6 +19,7 @@
 /* Local Debug Function */
 
 
+#if C_DEBUG
 #include <curses.h>
 #include "mem.h"
 
@@ -27,11 +28,15 @@
 #define PAIR_GREEN_BLACK 3
 #define PAIR_BLACK_GREY 4
 #define PAIR_GREY_RED 5
-
+#define PAIR_BLACK_GREEN 6
 
 void DBGUI_StartUp(void);
 
-struct DBGBlock {
+class DBGBlock {
+public:
+	DBGBlock() : win_main(NULL), win_reg(NULL), win_data(NULL), win_code(NULL),
+		win_var(NULL), win_out(NULL), active_win(0), input_y(0), global_mask(0) { }
+public:
 	WINDOW * win_main;					/* The Main Window */
 	WINDOW * win_reg;					/* Register Window */
 	WINDOW * win_data;					/* Data Output window */
@@ -57,4 +62,5 @@ extern DBGBlock dbg;
 /* Local Debug Stuff */
 Bitu DasmI386(char* buffer, PhysPt pc, Bitu cur_ip, bool bit32);
 int  DasmLastOperandSize(void);
+#endif
 

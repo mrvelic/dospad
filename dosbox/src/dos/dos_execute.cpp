@@ -54,8 +54,13 @@ struct EXE_Header {
 
 #define MAGIC1 0x5a4d
 #define MAGIC2 0x4d5a
-#define MAXENV 32768u
-#define ENV_KEEPFREE 83				 /* keep unallocated by environment variables */
+
+unsigned int MAXENV = 32768u;
+unsigned int ENV_KEEPFREE = 83;
+
+//#define MAXENV 65535u						/* mainline DOSBOx: original value was 32768u */
+//#define ENV_KEEPFREE 1024					/* keep unallocated by environment variables (original value mainline DOSBox: 83) */
+
 #define LOADNGO 0
 #define LOAD    1
 #define OVERLAY 3
@@ -148,13 +153,6 @@ void DOS_Terminate(Bit16u pspseg,bool tsr,Bit8u exitcode) {
 	} else {
 		GFX_SetTitle(-1,-1,-1,false);
 	}
-#if (C_DYNAMIC_X86) || (C_DYNREC)
-	if (CPU_AutoDetermineMode&CPU_AUTODETERMINE_CORE) {
-		cpudecoder=&CPU_Core_Normal_Run;
-		CPU_CycleLeft=0;
-		CPU_Cycles=0;
-	}
-#endif
 
 	return;
 }
@@ -163,8 +161,12 @@ static bool MakeEnv(char * name,Bit16u * segment) {
 	/* If segment to copy environment is 0 copy the caller's environment */
 	DOS_PSP psp(dos.psp());
 	PhysPt envread,envwrite;
+	unsigned int keepfree;
 	Bit16u envsize=1;
 	bool parentenv=true;
+
+	/* below 83 bytes, we must not append the mystery 0x01 + program name string */
+	keepfree = ENV_KEEPFREE;
 
 	if (*segment==0) {
 		if (!psp.GetEnvironment()) parentenv=false;				//environment seg=0
@@ -176,7 +178,7 @@ static bool MakeEnv(char * name,Bit16u * segment) {
 
 	if (parentenv) {
 		for (envsize=0; ;envsize++) {
-			if (envsize>=MAXENV - ENV_KEEPFREE) {
+			if (envsize >= (MAXENV - keepfree)) {
 				DOS_SetError(DOSERR_ENVIRONMENT_INVALID);
 				return false;
 			}
@@ -184,7 +186,8 @@ static bool MakeEnv(char * name,Bit16u * segment) {
 		}
 		envsize += 2;									/* account for trailing \0\0 */
 	}
-	Bit16u size=long2para(envsize+ENV_KEEPFREE);
+	Bit16u size = long2para(envsize+keepfree);
+	if (size == 0) size = 1;
 	if (!DOS_AllocateMemory(segment,&size)) return false;
 	envwrite=PhysMake(*segment,0);
 	if (parentenv) {
@@ -194,13 +197,22 @@ static bool MakeEnv(char * name,Bit16u * segment) {
 	} else {
 		mem_writeb(envwrite++,0);
 	}
-	mem_writew(envwrite,1);
-	envwrite+=2;
-	char namebuf[DOS_PATHLENGTH];
-	if (DOS_Canonicalize(name,namebuf)) {
-		MEM_BlockWrite(envwrite,namebuf,(Bitu)(strlen(namebuf)+1));
-		return true;
-	} else return false;
+
+	/* If you look at environment blocks in real DOS, you see \x01 and then the name of your program follow
+	 * the environment block for some reason. If the user set the "keep free" below 83 bytes, then don't
+	 * do it. This might break some games that look for that string, but that's the user's fault for
+	 * setting the option, not ours */
+	if (keepfree >= 83) {
+		mem_writew(envwrite,1);
+		envwrite+=2;
+		char namebuf[DOS_PATHLENGTH];
+		if (DOS_Canonicalize(name,namebuf)) {
+			MEM_BlockWrite(envwrite,namebuf,(Bitu)(strlen(namebuf)+1));
+			return true;
+		} else return false;
+	}
+
+	return true;
 }
 
 bool DOS_NewPSP(Bit16u segment, Bit16u size) {
@@ -341,6 +353,13 @@ bool DOS_Execute(char * name,PhysPt block_pt,Bit8u flags) {
 			minsize=long2para(imagesize+(head.minmemory<<4)+256);
 			if (head.maxmemory!=0) maxsize=long2para(imagesize+(head.maxmemory<<4)+256);
 			else maxsize=0xffff;
+
+            /* Bugfix: scene.org mirrors/hornet/demos/1991/putrefac.zip Putrefaction !PF.{3}
+             *         has an EXE header that specifies a maxsize less than minsize, and a
+             *         initial stack pointer that is only valid if we use the maxsize.
+             *
+             *         This allows it to run without the SS:IP out of range error below. */
+            if (maxsize < minsize) maxsize = minsize;
 		}
 		if (maxfree<minsize) {
 			if (iscom) {
@@ -461,7 +480,7 @@ bool DOS_Execute(char * name,PhysPt block_pt,Bit8u flags) {
 		sssp=RealMake(loadseg+head.initSS,head.initSP);
 		if (sssp >= RealMake(pspseg+memsize,0)) E_Exit("DOS:Initial SS:IP beyond allocated memory block for EXE image");
 		if (csip >= RealMake(pspseg+memsize,0)) E_Exit("DOS:Initial CS:IP beyond allocated memory block for EXE image");
-		if (head.initSP<4) LOG(LOG_EXEC,LOG_ERROR)("stack underflow/wrap at EXEC");
+		if (head.initSP<4) LOG(LOG_EXEC,LOG_ERROR)("stack underflow/wrap at EXEC SS:SP=%04x:%04x",head.initSS,head.initSP);
 	}
 
 	if (flags==LOAD) {
@@ -483,7 +502,7 @@ bool DOS_Execute(char * name,PhysPt block_pt,Bit8u flags) {
 	}
 
 	if (flags==LOADNGO) {
-		if ((reg_sp>0xfffe) || (reg_sp<18)) LOG(LOG_EXEC,LOG_ERROR)("stack underflow/wrap at EXEC");
+		if ((reg_sp>0xfffe) || (reg_sp<18)) LOG(LOG_EXEC,LOG_ERROR)("stack underflow/wrap at EXEC SS:SP=%04x:%04x",SegValue(ss),reg_sp);
 		/* Get Caller's program CS:IP of the stack and set termination address to that */
 		RealSetVec(0x22,RealMake(mem_readw(SegPhys(ss)+reg_sp+2),mem_readw(SegPhys(ss)+reg_sp)));
 		SaveRegisters();
@@ -499,7 +518,9 @@ bool DOS_Execute(char * name,PhysPt block_pt,Bit8u flags) {
 		/* copy fcbs */
 		newpsp.SetFCB1(block.exec.fcb1);
 		newpsp.SetFCB2(block.exec.fcb2);
-		/* Set the stack for new program */
+        /* Save the SS:SP on the PSP of new program */
+        newpsp.SetStack(RealMakeSeg(ss,reg_sp));
+        /* Set the stack for new program */
 		SegSet16(ss,RealSeg(sssp));reg_sp=RealOff(sssp);
 		/* Add some flags and CS:IP on the stack for the IRET */
 		CPU_Push16(RealSeg(csip));

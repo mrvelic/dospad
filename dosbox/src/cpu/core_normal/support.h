@@ -57,46 +57,58 @@ static INLINE Bit32s Fetchds() {
  *      CS:IP variables, reg_ip and core.cseip which Fetchb() modifies. */
 //TODO Could probably make all byte operands fast?
 #define JumpCond16_b(COND) {						\
-	SAVEIP;											\
 	Bit8s adj=Fetchbs();						\
+	SAVEIP;								\
 	if (COND) reg_ip+=adj;						\
-	reg_ip+=1;										\
-	continue;										\
+	continue;							\
 }
 
 #define JumpCond16_w(COND) {						\
-	SAVEIP;											\
 	Bit16s adj=Fetchws();						\
+	SAVEIP;								\
 	if (COND) reg_ip+=adj;						\
-	reg_ip+=2;										\
-	continue;										\
+	continue;							\
 }
 
 #define JumpCond32_b(COND) {						\
-	SAVEIP;											\
 	Bit8s adj=Fetchbs();						\
+	SAVEIP;								\
 	if (COND) reg_eip+=adj;						\
-	reg_eip+=1;										\
-	continue;										\
+	continue;							\
 }
 
 #define JumpCond32_d(COND) {						\
-	SAVEIP;											\
 	Bit32s adj=Fetchds();						\
+	SAVEIP;								\
 	if (COND) reg_eip+=adj;						\
-	reg_eip+=4;										\
-	continue;										\
+	continue;							\
 }
 
+#define MoveCond16(COND) {							\
+	GetRMrw;										\
+	if (rm >= 0xc0 ) {GetEArw; if (COND) *rmrw=*earw;}\
+	else {GetEAa; if (COND) *rmrw=LoadMw(eaa);}		\
+}
 
-#define SETcc(cc)											\
-	{														\
-		GetRM;												\
+#define MoveCond32(COND) {							\
+	GetRMrd;										\
+	if (rm >= 0xc0 ) {GetEArd; if (COND) *rmrd=*eard;}\
+	else {GetEAa; if (COND) *rmrd=LoadMd(eaa);}		\
+}
+
+#define SETcc(cc)							\
+	{								\
+		GetRM;							\
 		if (rm >= 0xc0 ) {GetEArb;*earb=(cc) ? 1 : 0;}		\
-		else {GetEAa;SaveMb(eaa,(cc) ? 1 : 0);}				\
+		else {GetEAa;SaveMb(eaa,(cc) ? 1 : 0);}			\
 	}
 
 #include "helpers.h"
-#include "table_ea.h"
+#if CPU_CORE <= CPU_ARCHTYPE_8086
+# include "table_ea_8086.h"
+#else
+# include "table_ea.h"
+#endif
 #include "../modrm.h"
+
 

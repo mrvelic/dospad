@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2002-2015  The DOSBox Team
+ *  Copyright (C) 2002-2013  The DOSBox Team
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -174,12 +174,27 @@ static GetEAHandler EATable[512]={
 	0,	0,	0,	0,	0,	0,	0,	0,	0,	0,	0,	0,	0,	0,	0,	0
 };
 
-#define GetEADirect							\
-	PhysPt eaa;								\
-	if (TEST_PREFIX_ADDR) {					\
-		eaa=BaseDS+Fetchd();				\
-	} else {								\
-		eaa=BaseDS+Fetchw();				\
-	}										\
+extern bool do_seg_limits;
 
+#define GetEADirect(sz)						\
+	PhysPt eaa;						\
+	if (TEST_PREFIX_ADDR)					\
+		eaa=Fetchd();					\
+	else							\
+		eaa=Fetchw();					\
+	if (do_seg_limits) {					\
+		if (Segs.expanddown[core.base_val_ds]) {	\
+			if (eaa <= SegLimit(core.base_val_ds)) {\
+				LOG_MSG("Limit check %x <= %x (E)",(unsigned int)eaa,(unsigned int)SegLimit(core.base_val_ds)); \
+				goto gp_fault;			\
+			}					\
+		}						\
+		else {						\
+			if ((eaa+(sz)-1UL) > SegLimit(core.base_val_ds)) { \
+				LOG_MSG("Limit check %x+%x-1 = %x > %x",(unsigned int)eaa,(unsigned int)sz,(unsigned int)(eaa+(sz)-1U),(unsigned int)SegLimit(core.base_val_ds)); \
+				goto gp_fault;			\
+			}					\
+		}						\
+	}							\
+	eaa += BaseDS;
 

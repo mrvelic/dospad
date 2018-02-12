@@ -25,7 +25,6 @@
 #include "mem.h"
 #include "regs.h"
 #include <cstdlib>
-#include "../save_state.h"
 
 extern bool vga_enable_3C6_ramdac;
 extern bool vga_sierra_lock_565;
@@ -182,7 +181,7 @@ void write_p3d5_et4k(Bitu reg,Bitu val,Bitu iolen) {
 		} else vga.s3.ex_hor_overflow=(val&0x15);
 		break;
 	default:
-		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:CRTC:ET4K:Write to illegal index %2X", reg);
+		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:CRTC:ET4K:Write to illegal index %2X", (int)reg);
 		break;
 	}
 }
@@ -200,7 +199,7 @@ Bitu read_p3d5_et4k(Bitu reg,Bitu iolen) {
 	RESTORE_ET4K(3d4, 37);
 	RESTORE_ET4K(3d4, 3f);
 	default:
-		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:CRTC:ET4K:Read from illegal index %2X", reg);
+		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:CRTC:ET4K:Read from illegal index %2X", (int)reg);
 		break;
 	}
 	return 0x0;
@@ -223,7 +222,7 @@ void write_p3c5_et4k(Bitu reg,Bitu val,Bitu iolen) {
 	// Unlikely to be used by games (things like ROM enable/disable and emulation of VGA vs EGA)
 	STORE_ET4K(3c4, 07);
 	default:
-		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:SEQ:ET4K:Write to illegal index %2X", reg);
+		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:SEQ:ET4K:Write to illegal index %2X", (int)reg);
 		break;
 	}
 }
@@ -233,7 +232,7 @@ Bitu read_p3c5_et4k(Bitu reg,Bitu iolen) {
 	RESTORE_ET4K(3c4, 06);
 	RESTORE_ET4K(3c4, 07);
 	default:
-		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:SEQ:ET4K:Read from illegal index %2X", reg);
+		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:SEQ:ET4K:Read from illegal index %2X", (int)reg);
 		break;
 	}
 	return 0x0;
@@ -286,7 +285,7 @@ void write_p3c0_et4k(Bitu reg,Bitu val,Bitu iolen) {
 	// TODO: Figure out if this has any practical use
 	STORE_ET4K(3c0, 17);
 	default:
-		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:ATTR:ET4K:Write to illegal index %2X", reg);
+		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:ATTR:ET4K:Write to illegal index %2X", (int)reg);
 		break;
 	}
 }
@@ -296,7 +295,7 @@ Bitu read_p3c1_et4k(Bitu reg,Bitu iolen) {
 	RESTORE_ET4K(3c0, 16);
 	RESTORE_ET4K(3c0, 17);
 	default:
-		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:ATTR:ET4K:Read from illegal index %2X", reg);
+		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:ATTR:ET4K:Read from illegal index %2X", (int)reg);
 		break;
 	}
 	return 0x0;
@@ -736,7 +735,7 @@ void write_p3d5_et3k(Bitu reg,Bitu val,Bitu iolen) {
 		break;
 
 	default:
-		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:CRTC:ET3K:Write to illegal index %2X", reg);
+		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:CRTC:ET3K:Write to illegal index %2X", (int)reg);
 		break;
 	}
 }
@@ -754,7 +753,7 @@ Bitu read_p3d5_et3k(Bitu reg,Bitu iolen) {
 	RESTORE_ET3K(3d4, 24);
 	RESTORE_ET3K(3d4, 25);
 	default:
-		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:CRTC:ET3K:Read from illegal index %2X", reg);
+		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:CRTC:ET3K:Read from illegal index %2X", (int)reg);
 		break;
 	}
 	return 0x0;
@@ -767,7 +766,7 @@ void write_p3c5_et3k(Bitu reg,Bitu val,Bitu iolen) {
 	STORE_ET3K(3c4, 06);
 	STORE_ET3K(3c4, 07);
 	default:
-		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:SEQ:ET3K:Write to illegal index %2X", reg);
+		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:SEQ:ET3K:Write to illegal index %2X", (int)reg);
 		break;
 	}
 }
@@ -777,7 +776,7 @@ Bitu read_p3c5_et3k(Bitu reg,Bitu iolen) {
 	RESTORE_ET3K(3c4, 06);
 	RESTORE_ET3K(3c4, 07);
 	default:
-		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:SEQ:ET3K:Read from illegal index %2X", reg);
+		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:SEQ:ET3K:Read from illegal index %2X", (int)reg);
 		break;
 	}
 	return 0x0;
@@ -810,7 +809,7 @@ void write_p3c0_et3k(Bitu reg,Bitu val,Bitu iolen) {
 	STORE_ET3K(3c0, 16);
 	STORE_ET3K(3c0, 17);
 	default:
-		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:ATTR:ET3K:Write to illegal index %2X", reg);
+		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:ATTR:ET3K:Write to illegal index %2X", (int)reg);
 		break;
 	}
 }
@@ -820,7 +819,7 @@ Bitu read_p3c1_et3k(Bitu reg,Bitu iolen) {
 	RESTORE_ET3K(3c0, 16);
 	RESTORE_ET3K(3c0, 17);
 	default:
-		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:ATTR:ET3K:Read from illegal index %2X", reg);
+		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:ATTR:ET3K:Read from illegal index %2X", (int)reg);
 		break;
 	}
 	return 0x0;
@@ -968,79 +967,3 @@ void SVGA_Setup_TsengET3K(void) {
 	phys_writeb(rom_base+0x007b,' ');
 }
 
-
-
-// save state support
-
-void POD_Save_VGA_Tseng( std::ostream& stream )
-{
-	// static globals
-
-
-	// - pure struct data
-	WRITE_POD( &et4k, et4k );
-	WRITE_POD( &et3k, et3k );
-}
-
-
-void POD_Load_VGA_Tseng( std::istream& stream )
-{
-	// static globals
-
-
-	// - pure struct data
-	READ_POD( &et4k, et4k );
-	READ_POD( &et3k, et3k );
-}
-
-
-/*
-ykhwong svn-daum 2012-02-20
-
-static globals:
-
-static SVGA_ET4K_DATA et4k;
-
-// - pure data
-	Bit8u extensionsEnabled;
-	Bit8u hicolorDACcmdmode;
-	Bit8u hicolorDACcommand;
-	Bitu store_3d4_31;
-	Bitu store_3d4_32;
-	Bitu store_3d4_33;
-	Bitu store_3d4_34;
-	Bitu store_3d4_35;
-	Bitu store_3d4_36;
-	Bitu store_3d4_37;
-	Bitu store_3d4_3f;
-	Bitu store_3c0_16;
-	Bitu store_3c0_17;
-
-	Bitu store_3c4_06;
-	Bitu store_3c4_07;
-
-	Bitu clockFreq[16];
-	Bitu biosMode;
-
-
-
-static SVGA_ET3K_DATA et3k;
-
-// - pure data
-	Bitu store_3d4_1b;
-	Bitu store_3d4_1c;
-	Bitu store_3d4_1d;
-	Bitu store_3d4_1e;
-	Bitu store_3d4_1f;
-	Bitu store_3d4_20;
-	Bitu store_3d4_21;
-	Bitu store_3d4_23;
-	Bitu store_3d4_24;
-	Bitu store_3d4_25;
-	Bitu store_3c0_16;
-	Bitu store_3c0_17;
-	Bitu store_3c4_06;
-	Bitu store_3c4_07;
-	Bitu clockFreq[8];
-	Bitu biosMode;
-*/

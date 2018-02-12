@@ -26,16 +26,19 @@
 #include "logging.h"
 #include "support.h"
 #include "control.h"
+#include "regs.h"
+#include "debug.h"
+#include "debug_inc.h"
 
-_LogGroup loggrp[LOG_MAX]={{"",true},{0,false}};
+static bool has_LOG_Init = false;
+static bool has_LOG_EarlyInit = false;
+static bool do_LOG_stderr = false;
+
+_LogGroup loggrp[LOG_MAX]={{"",LOG_NORMAL},{0,LOG_NORMAL}};
 FILE* debuglog = NULL;
 
 #if C_DEBUG
 #include <curses.h>
-
-#include "regs.h"
-#include "debug.h"
-#include "debug_inc.h"
 
 #include <list>
 #include <string>
@@ -48,6 +51,8 @@ static list<string>::iterator logBuffPos = logBuff.end();
 extern int old_cursor_state;
 
 void DEBUG_RefreshPage(char scroll) {
+	if (dbg.win_out == NULL) return;
+
 	if (scroll==-1 && logBuffPos!=logBuff.begin()) logBuffPos--;
 	else if (scroll==1 && logBuffPos!=logBuff.end()) logBuffPos++;
 
@@ -66,20 +71,10 @@ void DEBUG_RefreshPage(char scroll) {
 	wrefresh(dbg.win_out);
 }
 
-void LOG::operator() (char const* format, ...){
-	char buf[512];
-	va_list msg;
-	va_start(msg,format);
-	vsnprintf(buf,sizeof(buf)-1,format,msg);
-	va_end(msg);
-
-	if (d_type>=LOG_MAX) return;
-	if ((d_severity!=LOG_ERROR) && (!loggrp[d_type].enabled)) return;
-	DEBUG_ShowMsg("%10u: %s:%s\n",static_cast<Bit32u>(cycle_count),loggrp[d_type].front,buf);
-}
-
-
 static void Draw_RegisterLayout(void) {
+	if (dbg.win_main == NULL)
+		return;
+
 	mvwaddstr(dbg.win_reg,0,0,"EAX=");
 	mvwaddstr(dbg.win_reg,1,0,"EBX=");
 	mvwaddstr(dbg.win_reg,2,0,"ECX=");
@@ -107,6 +102,9 @@ static void Draw_RegisterLayout(void) {
 
 
 static void DrawBars(void) {
+	if (dbg.win_main == NULL)
+		return;
+
 	if (has_colors()) {
 		attrset(COLOR_PAIR(PAIR_BLACK_BLUE));
 	}
@@ -131,6 +129,9 @@ static void MakeSubWindows(void) {
 	/* Make all the subwindows */
 	int win_main_maxy, win_main_maxx; getmaxyx(dbg.win_main,win_main_maxy,win_main_maxx);
 	int outy=1; //Match values with above
+
+    LOG_MSG("DEBUG: MakeSubWindows dim x=%u y=%u",win_main_maxx,win_main_maxy);
+
 	/* The Register window  */
 	dbg.win_reg=subwin(dbg.win_main,4,win_main_maxx,outy,0);
 	outy+=5; // 6
@@ -144,7 +145,7 @@ static void MakeSubWindows(void) {
 	dbg.win_var=subwin(dbg.win_main,4,win_main_maxx,outy,0);
 	outy+=5; // 34
 	/* The Output Window */	
-	dbg.win_out=subwin(dbg.win_main,win_main_maxy-outy-2,win_main_maxx,outy,0);
+	dbg.win_out=subwin(dbg.win_main,win_main_maxy-outy,win_main_maxx,outy,0);
 	if(!dbg.win_reg ||!dbg.win_data || !dbg.win_code || !dbg.win_var || !dbg.win_out) E_Exit("Setting up windows failed");
 //	dbg.input_y=win_main_maxy-1;
 	scrollok(dbg.win_out,TRUE);
@@ -159,9 +160,11 @@ static void MakePairs(void) {
 	init_pair(PAIR_GREEN_BLACK, COLOR_GREEN /*| FOREGROUND_INTENSITY */, COLOR_BLACK);
 	init_pair(PAIR_BLACK_GREY, COLOR_BLACK /*| FOREGROUND_INTENSITY */, COLOR_WHITE);
 	init_pair(PAIR_GREY_RED, COLOR_WHITE/*| FOREGROUND_INTENSITY */, COLOR_RED);
+    init_pair(PAIR_BLACK_GREEN, COLOR_BLACK, COLOR_GREEN);
 }
 
 void DBGUI_StartUp(void) {
+	LOG(LOG_MISC,LOG_DEBUG)("DEBUG GUI startup");
 	/* Start the main window */
 	dbg.win_main=initscr();
 	cbreak();       /* take input chars one at a time, no wait for \n */
@@ -170,9 +173,6 @@ void DBGUI_StartUp(void) {
 	nodelay(dbg.win_main,true);
 	keypad(dbg.win_main,true);
 	#ifndef WIN32
-	printf("\e[8;50;80t");
-	fflush(NULL);
-	resizeterm(50,80);
 	touchwin(dbg.win_main);
 	#endif
 	old_cursor_state = curs_set(0);
@@ -185,6 +185,7 @@ void DBGUI_StartUp(void) {
 #endif
 
 void DEBUG_ShowMsg(char const* format,...) {
+	bool stderrlog = false;
 	char buf[512];
 	va_list msg;
 	size_t len;
@@ -193,21 +194,31 @@ void DEBUG_ShowMsg(char const* format,...) {
 	len = vsnprintf(buf,sizeof(buf)-2,format,msg); /* <- NTS: Did you know sprintf/vsnprintf returns number of chars written? */
 	va_end(msg);
 
+    /* remove newlines if present */
+    while (len > 0 && buf[len-1] == '\n') buf[--len] = 0;
+
 	/* Add newline if not present */
 	if (len > 0 && buf[len-1] != '\n') buf[len++] = '\n';
 	buf[len] = 0;
+
+	if (do_LOG_stderr || debuglog == NULL)
+		stderrlog = true;
+
+#if C_DEBUG
+	if (dbg.win_out != NULL)
+		stderrlog = false;
+    else
+        stderrlog = true;
+#endif
 
 	if (debuglog != NULL) {
 		fprintf(debuglog,"%s",buf);
 		fflush(debuglog);
 	}
-#if !C_DEBUG
-	else {
-		//fprintf(stderr,"DOSBox LOG: %s",buf);
-		fprintf(stderr,"%s",buf);
+	if (stderrlog) {
+		fprintf(stderr,"LOG: %s",buf);
 		fflush(stderr);
 	}
-#endif
 
 #if C_DEBUG
 	if (logBuffPos!=logBuff.end()) {
@@ -219,39 +230,125 @@ void DEBUG_ShowMsg(char const* format,...) {
 		logBuff.pop_front();
 
 	logBuffPos = logBuff.end();
-	wprintw(dbg.win_out,"%s",buf);
-	wrefresh(dbg.win_out);
+
+	if (dbg.win_out != NULL) {
+		wprintw(dbg.win_out,"%s",buf);
+		wrefresh(dbg.win_out);
+	}
 #endif
 }
 
-void LOG_Destroy(Section*) {
+/* callback function when DOSBox-X exits */
+void LOG::Exit() {
 	if (debuglog != NULL) {
+		fprintf(debuglog,"--END OF LOG--\n");
 		fclose(debuglog);
 		debuglog = NULL;
 	}
 }
 
-static void LOG_Init(Section * sec) {
-	Section_prop * sect=static_cast<Section_prop *>(sec);
-	const char * blah=sect->Get_string("logfile");
-	if (blah != NULL && blah[0] != 0 && (debuglog=fopen(blah,"wt+")) != NULL) {
+void Null_Init(Section *sec);
+
+void LOG::operator() (char const* format, ...){
+	const char *s_severity = "";
+	char buf[512];
+	va_list msg;
+
+	switch (d_severity) {
+		case LOG_DEBUG:	s_severity = " DEBUG"; break;
+		case LOG_NORMAL:s_severity = "      "; break;
+		case LOG_WARN:  s_severity = " WARN "; break;
+		case LOG_ERROR: s_severity = " ERROR"; break;
+		case LOG_FATAL: s_severity = " FATAL"; break;
+		default: break;
+	};
+
+	va_start(msg,format);
+	vsnprintf(buf,sizeof(buf)-1,format,msg);
+	va_end(msg);
+
+	if (d_type>=LOG_MAX) return;
+	if (d_severity < loggrp[d_type].min_severity) return;
+	DEBUG_ShowMsg("%10u%s %s:%s\n",static_cast<Bit32u>(cycle_count),s_severity,loggrp[d_type].front,buf);
+}
+
+void LOG::ParseEnableSetting(_LogGroup &group,const char *setting) {
+	if (!strcmp(setting,"true") || !strcmp(setting,"1") || !strcmp(setting,"normal"))
+		group.min_severity = LOG_NORMAL; /* original code's handling is equivalent to our "normal" setting */
+	else if (!strcmp(setting,"false") || !strcmp(setting,"0") || !strcmp(setting,""))
+		group.min_severity = LOG_ERROR; /* original code's handling is equivalent to our "error" setting */
+	else if (!strcmp(setting,"debug"))
+		group.min_severity = LOG_DEBUG;
+	else if (!strcmp(setting,"warn"))
+		group.min_severity = LOG_WARN;
+	else if (!strcmp(setting,"error"))
+		group.min_severity = LOG_ERROR;
+	else if (!strcmp(setting,"fatal"))
+		group.min_severity = LOG_FATAL;
+	else if (!strcmp(setting,"never"))
+		group.min_severity = LOG_NEVER;
+	else
+		group.min_severity = LOG_NORMAL;
+}
+
+void LOG::Init() {
+	char buf[1024];
+
+	assert(control != NULL);
+
+	/* do not init twice */
+	if (has_LOG_Init) return;
+	has_LOG_Init = true;
+
+	/* announce */
+	LOG_MSG("Logging init: beginning logging proper. This is the end of the early init logging");
+
+	/* get the [log] section */
+	Section_prop *sect = static_cast<Section_prop *>(control->GetSection("log"));
+	assert(sect != NULL);
+
+	/* do we write to a logfile, or not? */
+	const char *blah = sect->Get_string("logfile");
+	if (blah != NULL && blah[0] != 0) {
+		if ((debuglog=fopen(blah,"wt+")) != NULL) {
+			LOG_MSG("Logging: opened logfile '%s' successfully. All further logging will go to that file.",blah);
+			setbuf(debuglog,NULL);
+		}
+		else {
+			LOG_MSG("Logging: failed to open logfile '%s'. All further logging will be discarded. Error: %s",blah,strerror(errno));
+		}
 	}
 	else {
+		LOG_MSG("Logging: No logfile was given. All further logging will be discarded.");
 		debuglog=0;
 	}
 
-	sect->AddDestroyFunction(&LOG_Destroy);
-	char buf[1024];
+	/* end of early init logging */
+	do_LOG_stderr = false;
+
+	/* read settings for each log category, unless the -debug option was given,
+	 * in which case everything is set to debug level */
 	for (Bitu i=1;i<LOG_MAX;i++) {
 		strcpy(buf,loggrp[i].front);
 		buf[strlen(buf)]=0;
 		lowcase(buf);
-		loggrp[i].enabled=sect->Get_bool(buf);
+
+		if (control->opt_debug)
+			ParseEnableSetting(/*&*/loggrp[i],"debug");
+		else
+			ParseEnableSetting(/*&*/loggrp[i],sect->Get_string(buf));
 	}
+
+	LOG(LOG_MISC,LOG_DEBUG)("Logging init complete");
 }
 
+void LOG::EarlyInit(void) {
+	assert(control != NULL);
 
-void LOG_StartUp(void) {
+	/* do not init twice */
+	if (has_LOG_EarlyInit) return;
+	has_LOG_EarlyInit = true;
+
 	/* Setup logging groups */
 	loggrp[LOG_ALL].front="ALL";
 	loggrp[LOG_VGA].front="VGA";
@@ -284,18 +381,46 @@ void LOG_StartUp(void) {
 	loggrp[LOG_PCI].front="PCI";
 	
 	loggrp[LOG_VOODOO].front="SST";
-	
+
+	do_LOG_stderr = control->opt_earlydebug;
+
+	for (Bitu i=1;i<LOG_MAX;i++) {
+		if (control->opt_earlydebug)
+			ParseEnableSetting(/*&*/loggrp[i],"debug");
+		else
+			ParseEnableSetting(/*&*/loggrp[i],"warn");
+	}
+
+	LOG_MSG("Early LOG Init complete");
+}
+
+void LOG::SetupConfigSection(void) {
+	const char *log_values[] = {
+		/* compatibility with existing dosbox.conf files */
+		"true", "false",
+
+		/* log levels */
+		"debug",
+		"normal",
+		"warn",
+		"error",
+		"fatal",
+		"never",		/* <- this means NEVER EVER log anything */
+
+		0};
+
 	/* Register the log section */
-	Section_prop * sect=control->AddSection_prop("log",LOG_Init);
+	Section_prop * sect=control->AddSection_prop("log",Null_Init);
 	Prop_string* Pstring = sect->Add_string("logfile",Property::Changeable::Always,"");
 	Pstring->Set_help("file where the log messages will be saved to");
 	char buf[1024];
 	for (Bitu i=1;i<LOG_MAX;i++) {
 		strcpy(buf,loggrp[i].front);
 		lowcase(buf);
-		Prop_bool* Pbool = sect->Add_bool(buf,Property::Changeable::Always,true);
-		Pbool->Set_help("Enable/Disable logging of this type.");
+
+		Pstring = sect->Add_string(buf,Property::Changeable::Always,"false");
+		Pstring->Set_values(log_values);
+		Pstring->Set_help("Enable/Disable logging of this type.");
 	}
-//	MSG_Add("LOG_CONFIGFILE_HELP","Logging related options for the debugger.\n");
 }
 

@@ -37,6 +37,8 @@
 #include <cctype>
 #include <assert.h>
 
+#include "SDL_syswm.h"
+
 /* helper class for command execution */
 class VirtualBatch : public BatchFile {
 public:
@@ -63,8 +65,9 @@ static bool			shortcut=false;
 static SDL_Surface*		screenshot;
 static SDL_Surface*		background;
 
+#if !defined(C_SDL2)
 /* Prepare screen for UI */
-void UI_Init(void) {
+void GUI_LoadFonts(void) {
 	GUI::Font::addFont("default",new GUI::BitmapFont(int10_font_14,14,10));
 }
 
@@ -106,8 +109,7 @@ static void getPixel(Bits x, Bits y, int &r, int &g, int &b, int shift)
 }
 
 extern bool dos_kernel_disabled;
-
-extern void LoadMessageFile(const char * fname);
+extern Bitu currentWindowWidth, currentWindowHeight;
 
 static GUI::ScreenSDL *UI_Startup(GUI::ScreenSDL *screen) {
 	GFX_EndUpdate(0);
@@ -126,15 +128,16 @@ static GUI::ScreenSDL *UI_Startup(GUI::ScreenSDL *screen) {
 	int w, h;
 	bool fs;
 	GFX_GetSize(w, h, fs);
-#ifdef WIN32
-	if (!GFX_SDLUsingWinDIB()) {
-		if (w > 512) w = 640;
-		if (h > 350) h = 400;
-	}
-#endif
 	if (w <= 400) {
-		w *= 2; h *= 2;
+		w *=2; h *=2;
 	}
+
+    if (!fs) {
+        if (w < currentWindowWidth)
+            w = currentWindowWidth;
+        if (h < currentWindowHeight)
+            h = currentWindowHeight;
+    }
 
 	old_unicode = SDL_EnableUNICODE(1);
 	SDL_EnableKeyRepeat(SDL_DEFAULT_REPEAT_DELAY,SDL_DEFAULT_REPEAT_INTERVAL);
@@ -183,13 +186,13 @@ static GUI::ScreenSDL *UI_Startup(GUI::ScreenSDL *screen) {
 	mousetoggle = mouselocked;
 	if (mouselocked) GFX_CaptureMouse();
 
-	SDL_Surface* sdlscreen = SDL_SetVideoMode(w, h, 32, SDL_SWSURFACE|(fs?SDL_FULLSCREEN:SDL_RESIZABLE));
+	SDL_Surface* sdlscreen = SDL_SetVideoMode(w, h, 32, SDL_SWSURFACE|(fs?SDL_FULLSCREEN:0));
 	if (sdlscreen == NULL) E_Exit("Could not initialize video mode %ix%ix32 for UI: %s", w, h, SDL_GetError());
 
 	// fade out
-#ifndef WIN32 
+	// Jonathan C: do it FASTER!
 	SDL_Event event; 
-	for (int i = 0xff; i > 0; i -= 0x11) { 
+	for (int i = 0xff; i > 0; i -= 0x30) { 
 		SDL_SetAlpha(screenshot, SDL_SRCALPHA, i); 
 		SDL_BlitSurface(background, NULL, sdlscreen, NULL); 
 		SDL_BlitSurface(screenshot, NULL, sdlscreen, NULL); 
@@ -197,7 +200,6 @@ static GUI::ScreenSDL *UI_Startup(GUI::ScreenSDL *screen) {
 		while (SDL_PollEvent(&event)); 
 		SDL_Delay(40); 
 	} 
-#endif 
  
 	SDL_BlitSurface(background, NULL, sdlscreen, NULL);
 	SDL_UpdateRect(sdlscreen, 0, 0, 0, 0);
@@ -217,9 +219,9 @@ static void UI_Shutdown(GUI::ScreenSDL *screen) {
 	render.src.bpp = saved_bpp;
 
 	// fade in
-#ifndef WIN32
+	// Jonathan C: do it FASTER!
 	SDL_Event event;
-	for (int i = 0x00; i < 0xff; i += 0x11) {
+	for (int i = 0x00; i < 0xff; i += 0x30) {
 		SDL_SetAlpha(screenshot, SDL_SRCALPHA, i);
 		SDL_BlitSurface(background, NULL, sdlscreen, NULL);
 		SDL_BlitSurface(screenshot, NULL, sdlscreen, NULL);
@@ -227,7 +229,6 @@ static void UI_Shutdown(GUI::ScreenSDL *screen) {
 		while (SDL_PollEvent(&event)) {};
 		SDL_Delay(40); 
 	}
-#endif
 
 	// clean up
 	if (mousetoggle) GFX_CaptureMouse();
@@ -318,9 +319,7 @@ public:
 	void actionExecuted(GUI::ActionEventSource *b, const GUI::String &arg) {
 		std::string line;
 		if (prepare(line)) {
-			if (first_shell) section->ExecuteDestroy(false);
 			prop->SetValue(GUI::String(line));
-			if (first_shell) section->ExecuteInit(false);
 		}
 	}
 };
@@ -598,8 +597,6 @@ public:
 	}
 };
 
-#include "cpu.h"
-
 class SetCycles : public GUI::ToplevelWindow {
 protected:
 	GUI::Input *name;
@@ -624,10 +621,8 @@ public:
 				std::string tmp("cycles=");
 				const char* well = name->getText();
 				std::string s(well, 20);
-				sec->ExecuteDestroy(false);
 				tmp.append(s);
 				sec->HandleInputline(tmp);
-				sec->ExecuteInit(false);
 				delete well;
 			}
 		}
@@ -660,10 +655,8 @@ public:
 				const char* well = name->getText();
 				std::string s(well, 20);
 				std::string tmp("vsyncrate=");
-				sec->ExecuteDestroy(false);
 				tmp.append(s);
 				sec->HandleInputline(tmp);
-				sec->ExecuteInit(false);
 				delete well;
 			}
 		}
@@ -692,7 +685,6 @@ public:
 
 	void actionExecuted(GUI::ActionEventSource *b, const GUI::String &arg) {
 		if (arg == "OK") {
-			char * text=name->getText();
 			extern unsigned int hdd_defsize;
 			int human_readable = atoi(name->getText());
 			if (human_readable < 0)
@@ -770,7 +762,7 @@ public:
 			Section_prop *section = static_cast<Section_prop *>(sec);
 			new SectionEditor(getScreen(), 50, 30, section);
 		} else if (arg == "About") {
-			new GUI::MessageBox2(getScreen(), 200, 150, 280, "About DOSBox", "\nDOSBox SVN-Daum\nAn emulator for old DOS Games\n\nCopyright 2002-2015\nThe DOSBox Team");
+			new GUI::MessageBox2(getScreen(), 200, 150, 280, "About DOSBox", "\nDOSBox-X\nAn emulator for old DOS Games\n\nCopyright 2002-2014\nThe DOSBox Team");
 		} else if (arg == "Introduction") {
 			new GUI::MessageBox2(getScreen(), 20, 50, 600, "Introduction", MSG_Get("PROGRAM_INTRO"));
 		} else if (arg == "Getting Started") {
@@ -912,7 +904,7 @@ static void UI_Select(GUI::ScreenSDL *screen, int select) {
 			new SetCycles(screen, 90, 100, "Set CPU Cycles...");
 			break;
 		case 17:
-			new SetVsyncrate(screen, 90, 100, "Set Vertical Syncrate...");
+			new SetVsyncrate(screen, 90, 100, "Set vertical syncrate...");
 			break;
 		case 18:
 			new SetLocalSize(screen, 90, 100, "Set Default Local Freesize...");
@@ -935,8 +927,18 @@ static void UI_Select(GUI::ScreenSDL *screen, int select) {
 	}
 }
 
-void UI_Shortcut(int select) {
+void GUI_Shortcut(int select) {
 	if(running) return;
+
+    bool GFX_GetPreventFullscreen(void);
+
+    /* Sorry, the UI screws up 3Dfx OpenGL emulation.
+     * Remove this block when fixed. */
+    if (GFX_GetPreventFullscreen()) {
+        LOG_MSG("GUI is not available while 3Dfx OpenGL emulation is running");
+        return;
+    }
+
 	if(menu.maxwindow) ShowWindow(GetHWND(), SW_RESTORE);
 	shortcut=true;
 	GUI::ScreenSDL *screen = UI_Startup(NULL);
@@ -947,11 +949,21 @@ void UI_Shortcut(int select) {
 }
 #endif
 
-void UI_Run(bool pressed) {
+void GUI_Run(bool pressed) {
 	if (pressed || running) return;
+
+    bool GFX_GetPreventFullscreen(void);
+
+    /* Sorry, the UI screws up 3Dfx OpenGL emulation.
+     * Remove this block when fixed. */
+    if (GFX_GetPreventFullscreen()) {
+        LOG_MSG("GUI is not available while 3Dfx OpenGL emulation is running");
+        return;
+    }
+
 	GUI::ScreenSDL *screen = UI_Startup(NULL);
 	UI_Execute(screen);
 	UI_Shutdown(screen);
 	delete screen;
 }
-
+#endif /* !defined(C_SDL2) */

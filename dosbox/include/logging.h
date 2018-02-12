@@ -37,23 +37,21 @@ enum LOG_TYPES {
 };
 
 enum LOG_SEVERITIES {
+	LOG_DEBUG,
 	LOG_NORMAL,
 	LOG_WARN,
-	LOG_ERROR
+	LOG_ERROR,
+	LOG_FATAL,
+	LOG_NEVER
 };
 
 struct _LogGroup {
 	char const* front;
-	bool enabled;
+	enum LOG_SEVERITIES min_severity;
 };
 
 extern _LogGroup loggrp[LOG_MAX];
 extern FILE* debuglog;
-
-void LOG_Destroy(Section*);
-void LOG_StartUp(void);
-
-#if C_DEBUG
 
 class LOG 
 { 
@@ -66,37 +64,14 @@ public:
 		d_severity(severity)
 		{}
 
+	static void ParseEnableSetting(_LogGroup &group,const char *setting);
+	static void SetupConfigSection(void);
+	static void EarlyInit();
+	static void Init();
+	static void Exit();
+
 	void operator() (char const* buf, ...) GCC_ATTRIBUTE(__format__(__printf__, 2, 3));  //../src/debug/debug_gui.cpp
 };
-
-#else  //C_DEBUG
-
-struct LOG
-{
-	LOG(LOG_TYPES , LOG_SEVERITIES )								{ }
-	void operator() (char const* )									{ }
-	void operator() (char const* , double )								{ }
-	void operator() (char const* , double , double )						{ }
-	void operator() (char const* , double , double , double )					{ }
-	void operator() (char const* , double , double , double , double )				{ }
-	void operator() (char const* , double , double , double , double , double )			{ }
-	void operator() (char const* , double , double , double , double , double , double )		{ }
-	void operator() (char const* , double , double , double , double , double , double , double)	{ }
-
-
-
-	void operator() (char const* , char const* )							{ }
-	void operator() (char const* , char const* , double )						{ }
-	void operator() (char const* , char const* , double ,double )					{ }
-	void operator() (char const* , double , char const* )						{ }
-	void operator() (char const* , double , double, char const* )					{ }
-	void operator() (char const* , char const*, char const*)					{ }
-
-	void operator() (char const* , double , double , double , char const* )				{ }
-}; //add missing operators to here
-//try to avoid anything smaller than bit32...
-
-#endif //C_DEBUG
 
 void					DEBUG_ShowMsg(char const* format,...) GCC_ATTRIBUTE(__format__(__printf__, 1, 2));
 

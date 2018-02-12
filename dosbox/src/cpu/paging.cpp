@@ -29,7 +29,6 @@
 #include "cpu.h"
 #include "debug.h"
 #include "setup.h"
-#include "../save_state.h"
 
 PagingBlock paging;
 
@@ -111,7 +110,8 @@ static struct {
 Bits PageFaultCore(void) {
 	CPU_CycleLeft+=CPU_Cycles;
 	CPU_Cycles=1;
-	Bits ret=CPU_Core_Full_Run();
+//	Bits ret=CPU_Core_Full_Run();
+	Bits ret=CPU_Core_Normal_Run();
 	CPU_CycleLeft+=CPU_Cycles;
 	if (ret<0) E_Exit("Got a dosbox close machine in pagefault core?");
 	if (ret) 
@@ -282,8 +282,7 @@ static void PAGING_NewPageFault(PhysPt lin_addr, Bitu page_addr, bool prepare_on
 	if (prepare_only) {
 		cpu.exception.which = EXCEPTION_PF;
 		cpu.exception.error = faultcode;
-	} else if (dosbox_enable_nonrecursive_page_fault && dosbox_allow_nonrecursive_page_fault &&
-		dosbox_check_nonrecursive_pf_cs == SegValue(cs) && dosbox_check_nonrecursive_pf_eip == reg_eip) {
+	} else if (dosbox_enable_nonrecursive_page_fault && dosbox_allow_nonrecursive_page_fault) {
 		/* FIXME: Apparently, if Window 98/ME executes a floating point instruction that triggers a page
 		 *        fault and DOSBox is running the dynamic core, this code will throw the exception and
 		 *        the Normal_Loop() function farther up the call chain will not receive the exception,
@@ -315,8 +314,18 @@ static void PAGING_NewPageFault(PhysPt lin_addr, Bitu page_addr, bool prepare_on
 		 *                   reports an anomaly in it's cache, and then segfaults. core=normal may work,
 		 *                   but is guaranteed to crash if you're in Windows 3.1 and you enter the DOS
 		 *                   box. */
-//        LOG_MSG("DEBUG: Using non-recursive page fault for lin=0x%08x page=0x%08x faultcode=%u. Wish me luck.\n",
-//            lin_addr,page_addr,faultcode);
+#if 0//TODO make option
+		LOG_MSG("DEBUG: Using non-recursive page fault for lin=0x%08lx page=0x%08lx faultcode=%u. Wish me luck.\n",
+			(unsigned long)lin_addr,(unsigned long)page_addr,(unsigned int)faultcode);
+#endif
+
+		if (!(dosbox_check_nonrecursive_pf_cs == SegValue(cs) && dosbox_check_nonrecursive_pf_eip == reg_eip))
+			LOG_MSG("....CS:IP mistmatch expect %x:%x got %x:%x",
+				(unsigned int)dosbox_check_nonrecursive_pf_cs,
+				(unsigned int)dosbox_check_nonrecursive_pf_eip,
+				(unsigned int)SegValue(cs),
+				(unsigned int)reg_eip);
+
 		throw GuestPageFaultException(lin_addr,page_addr,faultcode);
 	} else {
 		// Save the state of the cpu cores
@@ -325,8 +334,9 @@ static void PAGING_NewPageFault(PhysPt lin_addr, Bitu page_addr, bool prepare_on
 		CPU_Decoder * old_cpudecoder;
 		old_cpudecoder=cpudecoder;
 		cpudecoder=&PageFaultCore;
+		LOG(LOG_PAGING,LOG_NORMAL)("Recursive PageFault for %lx used=%d",(unsigned long)lin_addr,(int)pf_queue.used);
 		if (pf_queue.used >= PF_QUEUESIZE) E_Exit("PF queue overrun.");
-		//if (pf_queue.used != 0) LOG_MSG("Warning: PAGING_NewPageFault() more than one level, now using level %d\n",pf_queue.used+1);
+		if (pf_queue.used != 0) LOG_MSG("Warning: PAGING_NewPageFault() more than one level, now using level %d\n",(int)pf_queue.used+1);
 		PF_Entry * entry=&pf_queue.entries[pf_queue.used++];
 		entry->cs=SegValue(cs);
 		entry->eip=reg_eip;
@@ -336,7 +346,6 @@ static void PAGING_NewPageFault(PhysPt lin_addr, Bitu page_addr, bool prepare_on
 		CPU_Exception(EXCEPTION_PF,faultcode);
 		DOSBOX_RunMachine();
 		pf_queue.used--;
-		LOG(LOG_PAGING,LOG_NORMAL)("Left PageFault for %x queue %d",lin_addr,pf_queue.used);
 		memcpy(&lflags,&old_lflags,sizeof(LazyFlags));
 		cpudecoder=old_cpudecoder;
 	}
@@ -1202,12 +1211,6 @@ void PAGING_Enable(bool enabled) {
 	if (paging.enabled==enabled) return;
 	paging.enabled=enabled;
 	if (enabled) {
-		if (GCC_UNLIKELY(cpudecoder==CPU_Core_Simple_Run)) {
-//			LOG_MSG("CPU core simple won't run this game,switching to normal");
-			cpudecoder=CPU_Core_Normal_Run;
-			CPU_CycleLeft+=CPU_Cycles;
-			CPU_Cycles=0;
-		}
 //		LOG(LOG_PAGING,LOG_NORMAL)("Enabled");
 		PAGING_SetDirBase(paging.cr3);
 	}
@@ -1218,167 +1221,17 @@ bool PAGING_Enabled(void) {
 	return paging.enabled;
 }
 
-class PAGING:public Module_base{
-public:
-	PAGING(Section* configuration):Module_base(configuration){
-		/* Setup default Page Directory, force it to update */
-		paging.enabled=false;
-		paging.wp=false;
-		PAGING_InitTLB();
-		Bitu i;
-		for (i=0;i<LINK_START;i++) {
-			paging.firstmb[i]=i;
-		}
-		pf_queue.used=0;
-	}
-	~PAGING(){}
-};
+void PAGING_Init() {
+	Bitu i;
 
-static PAGING* test;
-	
-static void PAGING_ShutDown(Section * sec) {
-	delete test;
+	// log
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing paging system (CPU linear -> physical mapping system)");
+
+	/* Setup default Page Directory, force it to update */
+	paging.enabled=false;
+	paging.wp=false;
+	PAGING_InitTLB();
+	for (i=0;i<LINK_START;i++) paging.firstmb[i]=i;
+	pf_queue.used=0;
 }
 
-void PAGING_Init(Section * sec) {
-	test = new PAGING(sec);
-	sec->AddDestroyFunction(&PAGING_ShutDown);
-}
-
-
-
-// save state support
-void POD_Save_CPU_Paging( std::ostream& stream )
-{
-	WRITE_POD( &paging.cr3, paging.cr3 );
-	WRITE_POD( &paging.cr2, paging.cr2 );
-	WRITE_POD( &paging.wp, paging.wp );
-	WRITE_POD( &paging.base, paging.base );
-
-	WRITE_POD( &paging.tlb.read, paging.tlb.read );
-	WRITE_POD( &paging.tlb.write, paging.tlb.write );
-	WRITE_POD( &paging.tlb.phys_page, paging.tlb.phys_page );
-
-	WRITE_POD( &paging.links, paging.links );
-	WRITE_POD( &paging.ur_links, paging.ur_links );
-	WRITE_POD( &paging.krw_links, paging.krw_links );
-	WRITE_POD( &paging.kr_links, paging.kr_links );
-
-	WRITE_POD( &paging.firstmb, paging.firstmb );
-	WRITE_POD( &paging.enabled, paging.enabled );
-
-	WRITE_POD( &pf_queue, pf_queue );
-}
-
-
-void POD_Load_CPU_Paging( std::istream& stream )
-{
-	READ_POD( &paging.cr3, paging.cr3 );
-	READ_POD( &paging.cr2, paging.cr2 );
-	READ_POD( &paging.wp, paging.wp );
-	READ_POD( &paging.base, paging.base );
-
-	READ_POD( &paging.tlb.read, paging.tlb.read );
-	READ_POD( &paging.tlb.write, paging.tlb.write );
-	READ_POD( &paging.tlb.phys_page, paging.tlb.phys_page );
-
-	READ_POD( &paging.links, paging.links );
-	READ_POD( &paging.ur_links, paging.ur_links );
-	READ_POD( &paging.krw_links, paging.krw_links );
-	READ_POD( &paging.kr_links, paging.kr_links );
-
-	READ_POD( &paging.firstmb, paging.firstmb );
-	READ_POD( &paging.enabled, paging.enabled );
-
-	READ_POD( &pf_queue, pf_queue );
-
-
-
-	// reset all information
-	paging.links.used = PAGING_LINKS;
-	PAGING_ClearTLB();
-
-	for( int lcv=0; lcv<TLB_SIZE; lcv++ ) {
-		paging.tlb.read[lcv] = 0;
-		paging.tlb.write[lcv] = 0;
-		paging.tlb.readhandler[lcv] = &init_page_handler;
-		paging.tlb.writehandler[lcv] = &init_page_handler;
-	}
-}
-
-
-
-/*
-ykhwong 2012-05-21
-
-
-struct PagingBlock
-	// - pure data
-	Bitu			cr3;
-	Bitu			cr2;
-	bool wp;
-
-
-	// - pure struct data
-	struct {
-		Bitu page;
-		PhysPt addr;
-	} base;
-
-
-#if defined(USE_FULL_TLB)
-	struct {
-		// - pure data
-		HostPt read[TLB_SIZE];
-		HostPt write[TLB_SIZE];
-
-		// - reloc ptr
-		PageHandler * readhandler[TLB_SIZE];
-		PageHandler * writehandler[TLB_SIZE];
-
-		// - pure data
-		Bit32u	phys_page[TLB_SIZE];
-	} tlb;
-#else
-	tlb_entry tlbh[TLB_SIZE];
-	tlb_entry *tlbh_banks[TLB_BANKS];
-#endif
-
-
-	// - pure struct data
-	struct {
-		Bitu used;
-		Bit32u entries[PAGING_LINKS];
-	} links;
-
-	struct {
-		Bitu used;
-		Bit32u entries[PAGING_LINKS];
-	} ur_links;
-
-	struct {
-		Bitu used;
-		Bit32u entries[PAGING_LINKS];
-	} krw_links;
-
-	struct {
-		Bitu used;
-		Bit32u entries[PAGING_LINKS];
-	} kr_links; // WP-only
-
-	Bit32u		firstmb[LINK_START];
-	bool		enabled;
-
-	
-	
-
-struct pf_queue
-	// - pure data	
-	Bitu used;
-	PF_Entry entries[PF_QUEUESIZE];
-		// - pure data	
-		Bitu cs;
-		Bitu eip;
-		Bitu page_addr;
-		Bitu mpl;
-*/

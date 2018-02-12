@@ -29,17 +29,16 @@
 #include "bios_disk.h"
 #include "setup.h"
 #include "cross.h" //fmod on certain platforms
-#include "../save_state.h"
 #include "control.h"
 bool date_host_forced=false;
-#if defined (WIN32)
+#if defined (WIN32) && !defined (__MINGW32__)
 #include "sys/timeb.h"
 #else
 #include "sys/time.h"
 #endif
 
 // sigh... Windows doesn't know gettimeofday
-#if defined (WIN32)
+#if defined (WIN32) && !defined (__MINGW32__)
 typedef Bitu suseconds_t;
 
 struct timeval {
@@ -137,14 +136,14 @@ static void cmos_writereg(Bitu port,Bitu val,Bitu iolen) {
 
 		if (cmos.lock)				// if locked, use locktime instead of current time
 		{
-			loctime = localtime(&cmos.locktime.tv_sec);
+			loctime = localtime((time_t*)&cmos.locktime.tv_sec);
 		}
 		else						// not locked, use current time
 		{
 			struct timeval curtime;
 			gettimeofday(&curtime, NULL);
 			curtime.tv_sec += cmos.time_diff;
-			loctime = localtime (&curtime.tv_sec);
+			loctime = localtime((time_t*)&curtime.tv_sec);
 		}
 
 		switch (cmos.reg)
@@ -298,6 +297,9 @@ static void cmos_writereg(Bitu port,Bitu val,Bitu iolen) {
 	}
 }
 
+unsigned char CMOS_GetShutdownByte() {
+	return cmos.regs[0x0F];
+}
 
 #define MAKE_RETURN(_VAL) (cmos.bcd ? ((((_VAL) / 10) << 4) | ((_VAL) % 10)) : (_VAL));
 
@@ -313,7 +315,7 @@ static Bitu cmos_readreg(Bitu port,Bitu iolen) {
 
 		if (cmos.lock)				// if locked, use locktime instead of current time
 		{
-			loctime = localtime(&cmos.locktime.tv_sec);
+			loctime = localtime((time_t*)&cmos.locktime.tv_sec);
 		}
 		else						// not locked, get current time
 		{
@@ -328,7 +330,7 @@ static Bitu cmos_readreg(Bitu port,Bitu iolen) {
 			}
 
 			curtime.tv_sec += cmos.time_diff;
-			loctime = localtime (&curtime.tv_sec);
+			loctime = localtime((time_t*)&curtime.tv_sec);
 		}
 
 		switch (cmos.reg)
@@ -542,84 +544,73 @@ void CMOS_SetRegister(Bitu regNr, Bit8u val) {
 }
 
 
-class CMOS:public Module_base{
-private:
-	IO_ReadHandleObject ReadHandler[2];
-	IO_WriteHandleObject WriteHandler[2];	
-public:
-	CMOS(Section* configuration):Module_base(configuration){
-		WriteHandler[0].Install(0x70,cmos_selreg,IO_MB);
-		WriteHandler[1].Install(0x71,cmos_writereg,IO_MB);
-		ReadHandler[0].Install(0x71,cmos_readreg,IO_MB);
-		cmos.timer.enabled=false;
-		cmos.timer.acknowledged=true;
-		cmos.reg=0xa;
-		cmos_writereg(0x71,0x26,1);
-		cmos.reg=0xb;
-		cmos_writereg(0x71,0x2,1);	//Struct tm *loctime is of 24 hour format,
-		if(date_host_forced) {
-			cmos.regs[0x0d]=(Bit8u)0x80;
-		} else {
-			cmos.reg=0xd;
-			cmos_writereg(0x71,0x80,1); /* RTC power on */
-		}
-		// Equipment is updated from bios.cpp and bios_disk.cpp
-		/* Fill in base memory size, it is 640K always */
-		cmos.regs[0x15]=(Bit8u)0x80;
-		cmos.regs[0x16]=(Bit8u)0x02;
-		/* Fill in extended memory size */
-		Bitu exsize=MEM_TotalPages()*4;
-		if (exsize >= 1024) exsize -= 1024;
-		else exsize = 0;
-		if (exsize > 65535) exsize = 65535; /* cap at 64MB. this value is returned as-is by INT 15H AH=0x88 in a 16-bit register */
-		cmos.regs[0x17]=(Bit8u)exsize;
-		cmos.regs[0x18]=(Bit8u)(exsize >> 8);
-		cmos.regs[0x30]=(Bit8u)exsize;
-		cmos.regs[0x31]=(Bit8u)(exsize >> 8);
-		if(date_host_forced) {
-			cmos.time_diff = 0;
-			cmos.locktime.tv_sec = 0;
-		}
-	}
-};
+static IO_ReadHandleObject ReadHandler[2];
+static IO_WriteHandleObject WriteHandler[2];	
 
-static CMOS* test;
-
-void CMOS_Destroy(Section* sec){
-	delete test;
+void CMOS_Destroy(Section* sec) {
 }
 
-void CMOS_Init(Section* sec) {
-	if (control->cmdline->FindExist("-date_host_forced")) {
+void CMOS_EnterPC98(Section* sec) {
+    /* No such device on PC-98 */
+	WriteHandler[0].Uninstall();
+	WriteHandler[1].Uninstall();
+	ReadHandler[0].Uninstall();
+	ReadHandler[1].Uninstall();
+}
+
+void CMOS_Reset(Section* sec) {
+	LOG(LOG_MISC,LOG_DEBUG)("CMOS_Reset(): reinitializing CMOS/RTC controller");
+
+	WriteHandler[0].Uninstall();
+	WriteHandler[1].Uninstall();
+	ReadHandler[0].Uninstall();
+	ReadHandler[1].Uninstall();
+
+	WriteHandler[0].Install(0x70,cmos_selreg,IO_MB);
+	WriteHandler[1].Install(0x71,cmos_writereg,IO_MB);
+	ReadHandler[0].Install(0x71,cmos_readreg,IO_MB);
+	cmos.timer.enabled=false;
+	cmos.timer.acknowledged=true;
+	cmos.reg=0xa;
+	cmos_writereg(0x71,0x26,1);
+	cmos.reg=0xb;
+	cmos_writereg(0x71,0x2,1);	//Struct tm *loctime is of 24 hour format,
+	if(date_host_forced) {
+		cmos.regs[0x0d]=(Bit8u)0x80;
+	} else {
+		cmos.reg=0xd;
+		cmos_writereg(0x71,0x80,1); /* RTC power on */
+	}
+	// Equipment is updated from bios.cpp and bios_disk.cpp
+	/* Fill in base memory size, it is 640K always */
+	cmos.regs[0x15]=(Bit8u)0x80;
+	cmos.regs[0x16]=(Bit8u)0x02;
+	/* Fill in extended memory size */
+	Bitu exsize=MEM_TotalPages()*4;
+	if (exsize >= 1024) exsize -= 1024;
+	else exsize = 0;
+	if (exsize > 65535) exsize = 65535; /* cap at 64MB. this value is returned as-is by INT 15H AH=0x88 in a 16-bit register */
+	cmos.regs[0x17]=(Bit8u)exsize;
+	cmos.regs[0x18]=(Bit8u)(exsize >> 8);
+	cmos.regs[0x30]=(Bit8u)exsize;
+	cmos.regs[0x31]=(Bit8u)(exsize >> 8);
+	if (date_host_forced) {
+		cmos.time_diff = 0;
+		cmos.locktime.tv_sec = 0;
+	}
+}
+
+void CMOS_Init() {
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing CMOS/RTC");
+
+	if (control->opt_date_host_forced) {
 		LOG_MSG("Synchronize date with host: Forced");
 		date_host_forced=true;
 	}
-	test = new CMOS(sec);
-	sec->AddDestroyFunction(&CMOS_Destroy,true);
+
+	AddExitFunction(AddExitFunctionFuncPair(CMOS_Destroy),true);
+	AddVMEventFunction(VM_EVENT_RESET,AddVMEventFunctionFuncPair(CMOS_Reset));
+
+	AddVMEventFunction(VM_EVENT_ENTER_PC98_MODE,AddVMEventFunctionFuncPair(CMOS_EnterPC98));
 }
 
-
-// save state support
-void *cmos_timerevent_PIC_Event = (void*)cmos_timerevent;
-
-namespace
-{
-class SerializeCmos : public SerializeGlobalPOD
-{
-public:
-    SerializeCmos() : SerializeGlobalPOD("CMOS")
-    {
-        registerPOD(cmos.regs);
-        registerPOD(cmos.nmi);
-        registerPOD(cmos.reg);
-        registerPOD(cmos.timer.enabled);
-        registerPOD(cmos.timer.div);
-        registerPOD(cmos.timer.delay);
-        registerPOD(cmos.timer.acknowledged);
-        registerPOD(cmos.last.timer);
-        registerPOD(cmos.last.ended);
-        registerPOD(cmos.last.alarm);
-        registerPOD(cmos.update_ended);
-    }
-} dummy;
-}

@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2002-2015  The DOSBox Team
+ *  Copyright (C) 2002-2013  The DOSBox Team
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -113,5 +113,5 @@ switch (inst.code.save) {
 	case 0:
 		break;
 	default:
-		LOG(LOG_CPU,LOG_ERROR)("SAVE:Unhandled code %d entry %X",inst.code.save,inst.entry);
+		LOG(LOG_CPU,LOG_ERROR)("SAVE:Unhandled code %d entry %lx",inst.code.save,(unsigned long)inst.entry);
 }

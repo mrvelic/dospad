@@ -25,13 +25,9 @@
 #endif
 #include <iostream>
 
-//Don't enable keeping changes and mapping lfb probably...
 #define VGA_LFB_MAPPED
-//#define VGA_KEEP_CHANGES
-#define VGA_CHANGE_SHIFT	9
 
 class PageHandler;
-
 
 enum VGAModes {
 	M_CGA2, M_CGA4,
@@ -40,9 +36,26 @@ enum VGAModes {
 	M_TEXT,
 	M_HERC_GFX, M_HERC_TEXT,
 	M_CGA16, M_TANDY2, M_TANDY4, M_TANDY16, M_TANDY_TEXT, M_AMSTRAD,
+    M_PC98,
 	M_ERROR
 };
 
+enum VGA_Vsync {
+	VS_Off,
+	VS_On,
+	VS_Force,
+	VS_Host,
+};
+
+struct vsync_state {
+	double period;
+	bool manual;		// use manual vsync timing
+	bool persistent;	// use persistent timer (to keep in sync even after internal mode switches)
+	bool faithful;		// use faithful framerate adjustment
+};
+
+extern struct vsync_state vsync;
+extern float uservsyncjolt;
 
 #define CLK_25 25175
 #define CLK_28 28322
@@ -113,7 +126,6 @@ typedef struct {
 } VGA_Config;
 
 typedef enum {
-	PART,
 	LINE,
 	EGALINE
 } Drawmode;
@@ -128,6 +140,7 @@ typedef struct {
 	Bitu bytes_skip;
 	Bit8u *linear_base;
 	Bitu linear_mask;
+    Bitu planar_mask;
 	Bitu address_add;
 	Bitu line_length;
 	Bitu address_line_total;
@@ -136,10 +149,8 @@ typedef struct {
 	Bitu vblank_skip;
 	Bitu lines_done;
 	Bitu split_line;
-	Bitu parts_total;
-	Bitu parts_lines;
-	Bitu parts_left;
 	Bitu byte_panning_shift;
+    Bitu render_step,render_max;
 	struct {
 		double framestart;
 		double vrstart, vrend;		// V-retrace
@@ -148,13 +159,11 @@ typedef struct {
 		double vblkstart, vblkend;	// V-Blanking
 		double vdend, vtotal;
 		double hdend, htotal;
-		double parts;
 		float singleline_delay;
 	} delay;
 	double screen_ratio;
 	double refresh;
-	bool doublescan_merging;
-	Bit8u font[64*1024];
+	Bit8u font[516*1024]; /* enlarged to 516KB for PC-98 character font data (256*16) + (128*2*128*16) */
 	Bit8u * font_tables[2];
 	Bitu blinking;
 	bool blink;
@@ -166,10 +175,9 @@ typedef struct {
 		Bit8u enabled;
 	} cursor;
 	Drawmode mode;
+	bool has_split;
 	bool vret_triggered;
 	bool vga_override;
-	bool linewise_set;
-	bool linewise_effect;
 	bool doublescan_set;
 	bool doublescan_effect;
 	bool char9_set;
@@ -423,12 +431,8 @@ typedef struct {
 	VGA_OTHER other;
 	VGA_Memory mem;
 	Bit32u vmemwrap; /* this is assumed to be power of 2 */
-	Bit8u* fastmem;  /* memory for fast (usually 16-color) rendering, always twice as big as vmemsize */
-	Bit8u* fastmem_orgptr;
 	Bit32u vmemsize;
-#ifdef VGA_KEEP_CHANGES
-	VGA_Changes changes;
-#endif
+    Bit32u vmemsize_alloced;
 	VGA_LFB lfb;
 } VGA_Type;
 
@@ -459,7 +463,7 @@ void VGA_ATTR_SetEGAMonitorPalette(EGAMonitorMode m);
 
 /* The VGA Subfunction startups */
 void VGA_SetupAttr(void);
-void VGA_SetupMemory(Section* sec);
+void VGA_SetupMemory(void);
 void VGA_SetupDAC(void);
 void VGA_SetupCRTC(void);
 void VGA_SetupMisc(void);
@@ -559,5 +563,20 @@ extern Bit32u TXT_BG_Table[16];
 extern Bit32u Expand16Table[4][16];
 extern Bit32u Expand16BigTable[0x10000];
 
+void VGA_DAC_UpdateColorPalette();
+
+extern uint32_t GFX_Rmask;
+extern unsigned char GFX_Rshift;
+
+extern uint32_t GFX_Gmask;
+extern unsigned char GFX_Gshift;
+
+extern uint32_t GFX_Bmask;
+extern unsigned char GFX_Bshift;
+
+extern uint32_t GFX_Amask;
+extern unsigned char GFX_Ashift;
+
+extern unsigned char GFX_bpp;
 
 #endif

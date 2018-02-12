@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2002-2015  The DOSBox Team
+ *  Copyright (C) 2002-2013  The DOSBox Team
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -32,6 +32,7 @@
 #include "debug.h"
 #include "support.h"
 #include "video.h"
+#include "menu.h"
 
 
 void upcase(std::string &str) {
@@ -168,6 +169,9 @@ double ConvDblWord(char * word) {
 	return 0.0f;
 }
 
+#if C_DEBUG
+#include <curses.h>
+#endif
 
 static char buf[1024];           //greater scope as else it doesn't always gets thrown right (linux/gcc2.95)
 void E_Exit(const char * format,...) {
@@ -180,6 +184,14 @@ void E_Exit(const char * format,...) {
 	va_end(msg);
 	strcat(buf,"\n");
 	LOG_MSG("E_Exit: %s\n",buf);
-
-	throw(buf);
+#if C_DEBUG
+	endwin();
+#endif
+	fprintf(stderr,"E_Exit: %s\n",buf);
+#if defined(WIN32) && !defined(C_SDL2)
+	/* Most Windows users DON'T run DOSBox-X from the command line! */
+	MessageBox(GetHWND(), buf, "E_Exit", MB_OK | MB_ICONEXCLAMATION);
+#endif
+	exit(0);
 }
+

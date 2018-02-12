@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2002-2015  The DOSBox Team
+ *  Copyright (C) 2002-2012  The DOSBox Team
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -23,7 +23,7 @@
 #include "pic.h"
 #include "timer.h"
 #include "setup.h"
-#include "../save_state.h"
+#include "control.h"
 
 #define PIC_QUEUESIZE 512
 
@@ -110,6 +110,7 @@ struct PIC_Controller {
 	void start_irq(Bit8u val);
 };
 
+int master_cascade_irq = -1;
 static PIC_Controller pics[2];
 static PIC_Controller& master = pics[0];
 static PIC_Controller& slave  = pics[1];
@@ -131,22 +132,38 @@ void PIC_Controller::set_imr(Bit8u val) {
 void PIC_Controller::activate() { 
 	//Stops CPU if master, signals master if slave
 	if(this == &master) {
-		PIC_IRQCheck = 1;
 		//cycles 0, take care of the port IO stuff added in raise_irq base caller.
+		PIC_IRQCheck = 1;
 		CPU_CycleLeft += CPU_Cycles;
 		CPU_Cycles = 0;
 		//maybe when coming from a EOI, give a tiny delay. (for the cpu to pick it up) (see PIC_Activate_IRQ)
 	} else {
-		master.raise_irq(2);
+		master.raise_irq(master_cascade_irq);
 	}
 }
 
 void PIC_Controller::deactivate() { 
-	//removes irq check value  if master, signals master if slave
+	//removes irq check value if master, signals master if slave
 	if(this == &master) {
-		PIC_IRQCheck = 0;
+		/* NTS: DOSBox code used to set PIC_IRQCheck = 0 here.
+		 *
+		 *      That's actually not the way to handle it. Here's why:
+		 *
+		 *      What would happen if one device raised an IRQ (setting PIC_IRQCheck=1)
+		 *      then before dispatching IRQs, another device lowered an IRQ (setting PIC_IRQCheck=0).
+		 *
+		 *      Lowering the IRQ would reset the flag, and PIC_runIRQs() would never process
+		 *      any pending IRQs even though some are waiting.
+		 *
+		 *      It's better if we set the flag when raising an IRQ, and leave the flag set until
+		 *      PIC_runIRQs() determines there are no more IRQs to dispatch. Then and only then
+		 *      will PIC_runIRQs() clear the flag. */
 	} else {
-		master.lower_irq(2);
+		/* just because ONE IRQ on the slave finished doesn't mean there aren't any others needing service! */
+		if ((irr&imrr) == 0)
+			master.lower_irq(master_cascade_irq);
+		else
+			LOG_MSG("Slave PIC: still to handle irr=%02x imrr=%02x isrr=%02x",irr,imrr,isrr);
 	}
 }
 
@@ -160,7 +177,6 @@ void PIC_Controller::start_irq(Bit8u val){
 		LOG_MSG("rotate on auto EOI not handled");
 	}
 }
-
 
 struct PICEntry {
 	float index;
@@ -176,7 +192,7 @@ static struct {
 } pic_queue;
 
 static void write_command(Bitu port,Bitu val,Bitu iolen) {
-	PIC_Controller * pic=&pics[port==0x20 ? 0 : 1];
+	PIC_Controller * pic=&pics[(port==0x20/*IBM*/ || port==0x00/*PC-98*/) ? 0 : 1];
 
 	if (GCC_UNLIKELY(val&0x10)) {		// ICW1 issued
 		if (val&0x04) LOG_MSG("PIC: 4 byte interval not handled");
@@ -196,7 +212,7 @@ static void write_command(Bitu port,Bitu val,Bitu iolen) {
 			else pic->special = false;
 			//Check if there are irqs ready to run, as the priority system has possibly been changed.
 			pic->check_for_irq();
-			LOG(LOG_PIC,LOG_NORMAL)("port %X : special mask %s",port,(pic->special)?"ON":"OFF");
+			LOG(LOG_PIC,LOG_NORMAL)("port %X : special mask %s",(int)port,(pic->special)?"ON":"OFF");
 		}
 	} else {	// OCW2 issued
 		if (val&0x20) {		// EOI commands
@@ -227,19 +243,20 @@ static void write_command(Bitu port,Bitu val,Bitu iolen) {
 }
 
 static void write_data(Bitu port,Bitu val,Bitu iolen) {
-	PIC_Controller * pic=&pics[port==0x21 ? 0 : 1];
+	PIC_Controller * pic=&pics[(port==0x21/*IBM*/ || port==0x02/*PC-98*/) ? 0 : 1];
+
 	switch(pic->icw_index) {
 	case 0:                        /* mask register */
 		pic->set_imr(val);
 		break;
 	case 1:                        /* icw2          */
-		LOG(LOG_PIC,LOG_NORMAL)("%d:Base vector %X",port==0x21 ? 0 : 1,val);
+		LOG(LOG_PIC,LOG_NORMAL)("%d:Base vector %X",port==0x21 ? 0 : 1,(int)val);
 		pic->vector_base = val&0xf8;
 		if(pic->icw_index++ >= pic->icw_words) pic->icw_index=0;
 		else if(pic->single) pic->icw_index=3;		/* skip ICW3 in single mode */
 		break;
 	case 2:							/* icw 3 */
-		LOG(LOG_PIC,LOG_NORMAL)("%d:ICW 3 %X",port==0x21 ? 0 : 1,val);
+		LOG(LOG_PIC,LOG_NORMAL)("%d:ICW 3 %X",port==0x21 ? 0 : 1,(int)val);
 		if(pic->icw_index++ >= pic->icw_words) pic->icw_index=0;
 		break;
 	case 3:							/* icw 4 */
@@ -253,22 +270,22 @@ static void write_data(Bitu port,Bitu val,Bitu iolen) {
 		*/
 		pic->auto_eoi=(val & 0x2)>0;
 		
-		LOG(LOG_PIC,LOG_NORMAL)("%d:ICW 4 %X",port==0x21 ? 0 : 1,val);
+		LOG(LOG_PIC,LOG_NORMAL)("%d:ICW 4 %X",port==0x21 ? 0 : 1,(int)val);
 
-		if ((val&0x01)==0) LOG_MSG("PIC:ICW4: %x, 8085 mode not handled",val);
-		if ((val&0x10)!=0) LOG_MSG("PIC:ICW4: %x, special fully-nested mode not handled",val);
+		if ((val&0x01)==0) LOG_MSG("PIC:ICW4: %x, 8085 mode not handled",(int)val);
+		if ((val&0x10)!=0) LOG_MSG("PIC:ICW4: %x, special fully-nested mode not handled",(int)val);
 
 		if(pic->icw_index++ >= pic->icw_words) pic->icw_index=0;
 		break;
 	default:
-		LOG(LOG_PIC,LOG_NORMAL)("ICW HUH? %X",val);
+		LOG(LOG_PIC,LOG_NORMAL)("ICW HUH? %X",(int)val);
 		break;
 	}
 }
 
 
 static Bitu read_command(Bitu port,Bitu iolen) {
-	PIC_Controller * pic=&pics[port==0x20 ? 0 : 1];
+	PIC_Controller * pic=&pics[(port==0x20/*IBM*/ || port==0x00/*PC-98*/) ? 0 : 1];
 	if (pic->request_issr){
 		return pic->isr;
 	} else { 
@@ -278,7 +295,7 @@ static Bitu read_command(Bitu port,Bitu iolen) {
 
 
 static Bitu read_data(Bitu port,Bitu iolen) {
-	PIC_Controller * pic=&pics[port==0x21 ? 0 : 1];
+	PIC_Controller * pic=&pics[(port==0x21/*IBM*/ || port==0x02/*PC-98*/) ? 0 : 1];
 	return pic->imr;
 }
 
@@ -290,15 +307,25 @@ static void pc_xt_nmi_write(Bitu port,Bitu val,Bitu iolen) {
 	CPU_NMI_gate = (val & 0x80) ? true : false;
 }
 
+int PIC_irq_delay = 2;
+
+/* FIXME: This should be called something else that's true to the ISA bus, like PIC_PulseIRQ, not Activate IRQ.
+ *        ISA interrupts are edge triggered, not level triggered. */
 void PIC_ActivateIRQ(Bitu irq) {
 	/* Remember what was once IRQ 2 on PC/XT is IRQ 9 on PC/AT */
-	if (enable_slave_pic) { /* PC/AT emulation with slave PIC cascade to master */
+    if (IS_PC98_ARCH) {
+        if (irq == 7) {
+            LOG(LOG_PIC,LOG_ERROR)("Attempted to raise IRQ %u, which is cascade IRQ",(int)irq);
+            return; /* don't raise cascade IRQ */
+        }
+    }
+    else if (enable_slave_pic) { /* PC/AT emulation with slave PIC cascade to master */
 		if (irq == 2) irq = 9;
 	}
 	else { /* PC/XT emulation with only master PIC */
 		if (irq == 9) irq = 2;
 		if (irq >= 8) {
-			LOG(LOG_PIC,LOG_ERROR)("Attempted to raise IRQ %u when slave PIC does not exist",irq);
+			LOG(LOG_PIC,LOG_ERROR)("Attempted to raise IRQ %u when slave PIC does not exist",(int)irq);
 			return;
 		}
 	}
@@ -306,35 +333,33 @@ void PIC_ActivateIRQ(Bitu irq) {
 	Bitu t = irq>7 ? (irq - 8): irq;
 	PIC_Controller * pic=&pics[irq>7 ? 1 : 0];
 
-	Bit32s OldCycles = CPU_Cycles;
 	pic->raise_irq(t); //Will set the CPU_Cycles to zero if this IRQ will be handled directly
 
-	if (GCC_UNLIKELY(OldCycles != CPU_Cycles)) {
-		// if CPU_Cycles have changed, this means that the interrupt was triggered by an I/O
-		// register write rather than an event.
-		// Real hardware executes 0 to ~13 NOPs or comparable instructions
-		// before the processor picks up the interrupt. Let's try with 2
-		// cycles here.
-		// Required by Panic demo (irq0), It came from the desert (MPU401)
-		// Does it matter if CPU_CycleLeft becomes negative?
+    // Real hardware executes 0 to ~13 NOPs or comparable instructions
+    // before the processor picks up the interrupt. Let's try with 2
+    // cycles here.
+    // Required by Panic demo (irq0), It came from the desert (MPU401),
+    // Pizza by Port Mortem (SB IRQ detection),
+    // Does it matter if CPU_CycleLeft becomes negative?
 
-		// It might be an idea to do this always in order to simulate this
-		// So on write mask and EOI as well. (so inside the activate function)
-//		CPU_CycleLeft += (CPU_Cycles-2);
-		CPU_CycleLeft -= 2;
-		CPU_Cycles = 2;
-	}
+    // It might be an idea to do this always in order to simulate this
+    // So on write mask and EOI as well. (so inside the activate function)
+    CPU_CycleLeft += (CPU_Cycles-PIC_irq_delay);
+    CPU_Cycles = PIC_irq_delay;
 }
 
 void PIC_DeActivateIRQ(Bitu irq) {
 	/* Remember what was once IRQ 2 on PC/XT is IRQ 9 on PC/AT */
-	if (enable_slave_pic) { /* PC/AT emulation with slave PIC cascade to master */
+    if (IS_PC98_ARCH) {
+        if (irq == 7) return;
+    }
+    else if (enable_slave_pic) { /* PC/AT emulation with slave PIC cascade to master */
 		if (irq == 2) irq = 9;
 	}
 	else { /* PC/XT emulation with only master PIC */
 		if (irq == 9) irq = 2;
 		if (irq >= 8) {
-			LOG(LOG_PIC,LOG_ERROR)("Attempted to lower IRQ %u when slave PIC does not exist",irq);
+			LOG(LOG_PIC,LOG_ERROR)("Attempted to lower IRQ %u when slave PIC does not exist",(int)irq);
 			return;
 		}
 	}
@@ -344,12 +369,47 @@ void PIC_DeActivateIRQ(Bitu irq) {
 	pic->lower_irq(t);
 }
 
+enum PIC_irq_hacks PIC_IRQ_hax[16] = { PIC_irq_hack_none };
+
+void PIC_Set_IRQ_hack(int IRQ,enum PIC_irq_hacks hack) {
+	if (IRQ < 0 || IRQ >= 16) return;
+	PIC_IRQ_hax[IRQ] = hack;
+}
+
+enum PIC_irq_hacks PIC_parse_IRQ_hack_string(const char *str) {
+	if (!strcmp(str,"none"))
+		return PIC_irq_hack_none;
+	else if (!strcmp(str,"cs_equ_ds"))
+		return PIC_irq_hack_cs_equ_ds;
+
+	return PIC_irq_hack_none;
+}
+
+static bool IRQ_hack_check_cs_equ_ds(const int IRQ) {
+	uint16_t s_cs = SegValue(cs);
+	uint16_t s_ds = SegValue(ds);
+
+	if (s_cs >= 0xA000)
+		return true; // don't complain about the BIOS ISR
+
+	if (s_cs != s_ds) {
+		LOG(LOG_PIC,LOG_DEBUG)("Not dispatching IRQ %d according to IRQ hack. CS != DS",IRQ);
+		return false;
+	}
+
+	return true;
+}
+
 static void slave_startIRQ(){
 	Bit8u pic1_irq = 8;
 	const Bit8u p = (slave.irr & slave.imrr)&slave.isrr;
 	const Bit8u max = slave.special?8:slave.active_irq;
-	for(Bit8u i = 0,s = 1;i < max;i++, s<<=1){
-		if (p&s){
+	for(Bit8u i = 0,s = 1;i < max;i++, s<<=1) {
+		if (p&s) {
+			if (PIC_IRQ_hax[i+8] == PIC_irq_hack_cs_equ_ds)
+				if (!IRQ_hack_check_cs_equ_ds(i+8))
+					continue; // skip IRQ
+
 			pic1_irq = i;
 			break;
 		}
@@ -359,13 +419,13 @@ static void slave_startIRQ(){
 		/* we have an IRQ routing problem. this code is supposed to emulate the fact that
 		 * what was once IRQ 2 on PC/XT is routed to IRQ 9 on AT systems, because IRQ 8-15
 		 * cascade to IRQ 2 on such systems. but it's nothing to E_Exit() over. */
-		LOG(LOG_PIC,LOG_ERROR)("ISA PIC problem: IRQ 2 is active on master PIC without active IRQ 8-15 on slave PIC.");
-		slave.lower_irq(2); /* clear it */
+		LOG(LOG_PIC,LOG_ERROR)("ISA PIC problem: IRQ %d (cascade) is active on master PIC without active IRQ 8-15 on slave PIC.",master_cascade_irq);
+		slave.lower_irq(master_cascade_irq); /* clear it */
 		return;
 	}
 
 	slave.start_irq(pic1_irq);
-	master.start_irq(2);
+	master.start_irq(master_cascade_irq);
 	CPU_HW_Interrupt(slave.vector_base + pic1_irq);
 }
 
@@ -377,14 +437,20 @@ static void inline master_startIRQ(Bitu i){
 void PIC_runIRQs(void) {
 	if (!GETFLAG(IF)) return;
 	if (GCC_UNLIKELY(!PIC_IRQCheck)) return;
-	if (GCC_UNLIKELY(cpudecoder==CPU_Core_Normal_Trap_Run)) return;
+	if (GCC_UNLIKELY(cpudecoder==CPU_Core_Normal_Trap_Run)) return; // FIXME: Why?
 	if (GCC_UNLIKELY(CPU_NMI_active) || GCC_UNLIKELY(CPU_NMI_pending)) return; /* NMI has higher priority than PIC */
 
 	const Bit8u p = (master.irr & master.imrr)&master.isrr;
 	const Bit8u max = master.special?8:master.active_irq;
-	for(Bit8u i = 0,s = 1;i < max;i++, s<<=1){
-		if (p&s){
-			if (i==2 && enable_slave_pic) { //second pic
+	Bit8u i,s;
+
+	for (i = 0,s = 1;i < max;i++, s<<=1){
+		if (p&s) {
+			if (PIC_IRQ_hax[i] == PIC_irq_hack_cs_equ_ds)
+				if (!IRQ_hack_check_cs_equ_ds(i))
+					continue; // skip IRQ
+
+			if ((int)i == master_cascade_irq) { //second pic, or will not match if master_cascade_irq == -1
 				slave_startIRQ();
 			} else {
 				master_startIRQ(i);
@@ -392,8 +458,11 @@ void PIC_runIRQs(void) {
 			break;
 		}
 	}
-	//Disable check variable.
-	PIC_IRQCheck = 0;
+
+	/* if we cleared all IRQs, then stop checking.
+	 * otherwise, keep the flag set for the next IRQ to process. */
+	if (i == max && (master.irr&master.imrr) == 0)
+		PIC_IRQCheck = 0;
 }
 
 void PIC_SetIRQMask(Bitu irq, bool masked) {
@@ -437,6 +506,7 @@ static void AddEntry(PICEntry * entry) {
 		CPU_Cycles=0;
 	}
 }
+
 static bool InEventService = false;
 static float srv_lag = 0;
 
@@ -505,42 +575,53 @@ void PIC_RemoveEvents(PIC_EventHandler handler) {
 	}	
 }
 
+extern ClockDomain clockdom_DOSBox_cycles;
 
 bool PIC_RunQueue(void) {
 	/* Check to see if a new millisecond needs to be started */
-	CPU_CycleLeft+=CPU_Cycles;
-	CPU_Cycles=0;
-	if (CPU_CycleLeft<=0) {
-		return false;
-	}
-	/* Check the queue for an entry */
-	Bits index_nd=PIC_TickIndexND();
-	InEventService = true;
-	while (pic_queue.next_entry && (pic_queue.next_entry->index*CPU_CycleMax<=index_nd)) {
-		PICEntry * entry=pic_queue.next_entry;
-		pic_queue.next_entry=entry->next;
+	CPU_CycleLeft += CPU_Cycles;
+	CPU_Cycles = 0;
 
-		srv_lag = entry->index;
-		(entry->pic_event)(entry->value); // call the event handler
+	if (CPU_CycleLeft > 0) {
+		if (PIC_IRQCheck)
+			PIC_runIRQs();
 
-		/* Put the entry in the free list */
-		entry->next=pic_queue.free_entry;
-		pic_queue.free_entry=entry;
-	}
-	InEventService = false;
+		/* Check the queue for an entry */
+		Bits index_nd=PIC_TickIndexND();
+		InEventService = true;
+		while (pic_queue.next_entry && (pic_queue.next_entry->index*CPU_CycleMax<=index_nd)) {
+			PICEntry * entry=pic_queue.next_entry;
+			pic_queue.next_entry=entry->next;
 
-	/* Check when to set the new cycle end */
-	if (pic_queue.next_entry) {
-		Bits cycles=(Bits)(pic_queue.next_entry->index*CPU_CycleMax-index_nd);
-		if (GCC_UNLIKELY(!cycles)) cycles=1;
-		if (cycles<CPU_CycleLeft) {
-			CPU_Cycles=cycles;
-		} else {
-			CPU_Cycles=CPU_CycleLeft;
+			srv_lag = entry->index;
+			(entry->pic_event)(entry->value); // call the event handler
+
+			/* Put the entry in the free list */
+			entry->next=pic_queue.free_entry;
+			pic_queue.free_entry=entry;
 		}
-	} else CPU_Cycles=CPU_CycleLeft;
-	CPU_CycleLeft-=CPU_Cycles;
-	if 	(PIC_IRQCheck)	PIC_runIRQs();
+		InEventService = false;
+
+		/* Check when to set the new cycle end */
+		if (pic_queue.next_entry) {
+			Bits cycles=(Bits)(pic_queue.next_entry->index*CPU_CycleMax-index_nd);
+			if (GCC_UNLIKELY(!cycles)) cycles=1;
+			if (cycles<CPU_CycleLeft) {
+				CPU_Cycles=cycles;
+			} else {
+				CPU_Cycles=CPU_CycleLeft;
+			}
+		} else CPU_Cycles=CPU_CycleLeft;
+		CPU_CycleLeft-=CPU_Cycles;
+
+        if (PIC_IRQCheck)
+            PIC_runIRQs();
+    }
+
+	/* if we're out of cycles, then return false. don't execute any more instructions */
+	if ((CPU_CycleLeft+CPU_Cycles) <= 0)
+		return false;
+
 	return true;
 }
 
@@ -565,7 +646,7 @@ void TIMER_ShutdownTickHandlers() {
 	}
 
 	if (leftovers != 0)
-		LOG_MSG("TIMER: %u leftover handlers (clean up!).\n",leftovers);
+		LOG(LOG_MISC,LOG_DEBUG)("TIMER: %u leftover handlers (clean up!).",leftovers);
 }
 
 void TIMER_DelTickHandler(TIMER_TickHandler handler) {
@@ -589,6 +670,8 @@ void TIMER_AddTickHandler(TIMER_TickHandler handler) {
 	firstticker=newticker;
 }
 
+extern Bitu time_limit_ms;
+
 static unsigned long PIC_benchstart = 0;
 static unsigned long PIC_tickstart = 0;
 
@@ -603,14 +686,20 @@ void TIMER_AddTick(void) {
 		PIC_benchstart = ticks;
 		PIC_tickstart = PIC_Ticks;
 	}
-	CPU_CycleLeft=CPU_CycleMax;
-	CPU_Cycles=0;
+	CPU_CycleLeft += CPU_CycleMax + CPU_Cycles;
+	CPU_Cycles = 0;
+
+    /* timeout */
+    if (time_limit_ms != 0 && PIC_Ticks >= time_limit_ms)
+        throw int(1);
+
 	/* Go through the list of scheduled events and lower their index with 1000 */
 	PICEntry * entry=pic_queue.next_entry;
 	while (entry) {
 		entry->index -= 1.0;
 		entry=entry->next;
 	}
+
 	/* Call our list of ticker handlers */
 	TickerBlock * ticker=firstticker;
 	while (ticker) {
@@ -622,536 +711,133 @@ void TIMER_AddTick(void) {
 
 static IO_WriteHandleObject PCXT_NMI_WriteHandler;
 
-/* Use full name to avoid name clash with compile option for position-independent code */
-class PIC_8259A: public Module_base {
-private:
-	IO_ReadHandleObject ReadHandler[4];
-	IO_WriteHandleObject WriteHandler[4];
-public:
-	PIC_8259A(Section* configuration):Module_base(configuration){
-		Section_prop * section=static_cast<Section_prop *>(configuration);
+static IO_ReadHandleObject ReadHandler[4];
+static IO_WriteHandleObject WriteHandler[4];
 
-		enable_slave_pic = section->Get_bool("enable slave pic");
-		enable_pc_xt_nmi_mask = section->Get_bool("enable pc nmi mask");
+void PIC_Reset(Section *sec) {
+	Bitu i;
 
-		/* Setup pic0 and pic1 with initial values like DOS has normally */
-		PIC_IRQCheck=0;
-		PIC_Ticks=0;
-		Bitu i;
-		for (i=0;i<2;i++) {
-			pics[i].auto_eoi=false;
-			pics[i].rotate_on_auto_eoi=false;
-			pics[i].request_issr=false;
-			pics[i].special=false;
-			pics[i].single=false;
-			pics[i].icw_index=0;
-			pics[i].icw_words=0;
-			pics[i].irr = pics[i].isr = pics[i].imrr = 0;
-			pics[i].isrr = pics[i].imr = 0xff;
-			pics[i].active_irq = 8;
-		}
-		master.vector_base = 0x08;
-		slave.vector_base = 0x70;
+	ReadHandler[0].Uninstall();
+	ReadHandler[1].Uninstall();
+	WriteHandler[0].Uninstall();
+	WriteHandler[1].Uninstall();
+	ReadHandler[2].Uninstall();
+	ReadHandler[3].Uninstall();
+	WriteHandler[2].Uninstall();
+	WriteHandler[3].Uninstall();
+	PCXT_NMI_WriteHandler.Uninstall();
 
-		PIC_SetIRQMask(0,false);					/* Enable system timer */
-		PIC_SetIRQMask(1,false);					/* Enable system timer */
-		PIC_SetIRQMask(2,false);					/* Enable second pic */
-		PIC_SetIRQMask(8,false);					/* Enable RTC IRQ */
+	/* NTS: Parsing this on reset allows PIC configuration changes on reboot instead of restarting the entire emulator */
+	Section_prop * section=static_cast<Section_prop *>(control->GetSection("dosbox"));
+	assert(section != NULL);
 
-		ReadHandler[0].Install(0x20,read_command,IO_MB);
-		ReadHandler[1].Install(0x21,read_data,IO_MB);
-		WriteHandler[0].Install(0x20,write_command,IO_MB);
-		WriteHandler[1].Install(0x21,write_data,IO_MB);
+	enable_slave_pic = section->Get_bool("enable slave pic");
+	enable_pc_xt_nmi_mask = section->Get_bool("enable pc nmi mask");
+    PIC_irq_delay = section->Get_int("irq delay");
+    if (PIC_irq_delay < 0) PIC_irq_delay = 2; /* default */
 
-		/* the secondary slave PIC takes priority over PC/XT NMI mask emulation */
-		if (enable_slave_pic) {
-			ReadHandler[2].Install(0xa0,read_command,IO_MB);
-			ReadHandler[3].Install(0xa1,read_data,IO_MB);
-			WriteHandler[2].Install(0xa0,write_command,IO_MB);
-			WriteHandler[3].Install(0xa1,write_data,IO_MB);
-		}
-		else if (enable_pc_xt_nmi_mask) {
-			PCXT_NMI_WriteHandler.Install(0xa0,pc_xt_nmi_write,IO_MB);
-		}
+    if (enable_slave_pic)
+        master_cascade_irq = IS_PC98_ARCH ? 7 : 2;
+    else
+        master_cascade_irq = -1;
 
-		/* Initialize the pic queue */
-		for (i=0;i<PIC_QUEUESIZE-1;i++) {
-			pic_queue.entries[i].next=&pic_queue.entries[i+1];
+	// LOG
+	LOG(LOG_MISC,LOG_DEBUG)("PIC_Reset(): reinitializing PIC controller (cascade=%d)",master_cascade_irq);
 
-			// savestate compatibility
-			pic_queue.entries[i].pic_event = 0;
-		}
-		pic_queue.entries[PIC_QUEUESIZE-1].next=0;
-		pic_queue.free_entry=&pic_queue.entries[0];
-		pic_queue.next_entry=0;
+	/* Setup pic0 and pic1 with initial values like DOS has normally */
+	PIC_Ticks=0;
+	PIC_IRQCheck=0;
+	for (i=0;i<2;i++) {
+		pics[i].auto_eoi=false;
+		pics[i].rotate_on_auto_eoi=false;
+		pics[i].request_issr=false;
+		pics[i].special=false;
+		pics[i].single=false;
+		pics[i].icw_index=0;
+		pics[i].icw_words=0;
+		pics[i].irr = pics[i].isr = pics[i].imrr = 0;
+		pics[i].isrr = pics[i].imr = 0xff;
+		pics[i].active_irq = 8;
 	}
 
-	~PIC_8259A(){
-		TIMER_ShutdownTickHandlers();
+    /* IBM: IRQ 0-15 is INT 0x08-0x0F, 0x70-0x7F
+     * PC-98: IRQ 0-15 is INT 0x08-0x17 */
+	master.vector_base = 0x08;
+	slave.vector_base = IS_PC98_ARCH ? 0x10 : 0x70;
+
+    for (Bitu i=0;i < 16;i++)
+        PIC_SetIRQMask(i,true);
+
+	PIC_SetIRQMask(0,false);					/* Enable system timer */
+	PIC_SetIRQMask(1,false);					/* Enable system timer */
+	PIC_SetIRQMask(2,false);					/* Enable second pic */
+	PIC_SetIRQMask(8,false);					/* Enable RTC IRQ */
+
+    /* I/O port map
+     *
+     * IBM PC/XT/AT     NEC PC-98        A0
+     * ---------------------------------------
+     * 0x20             0x00             0
+     * 0x21             0x02             1
+     * 0xA0             0x08             0
+     * 0xA1             0x0A             1
+     */
+
+	ReadHandler[0].Install(IS_PC98_ARCH ? 0x00 : 0x20,read_command,IO_MB);
+	ReadHandler[1].Install(IS_PC98_ARCH ? 0x02 : 0x21,read_data,IO_MB);
+	WriteHandler[0].Install(IS_PC98_ARCH ? 0x00 : 0x20,write_command,IO_MB);
+	WriteHandler[1].Install(IS_PC98_ARCH ? 0x02 : 0x21,write_data,IO_MB);
+
+	/* the secondary slave PIC takes priority over PC/XT NMI mask emulation */
+	if (enable_slave_pic) {
+		ReadHandler[2].Install(IS_PC98_ARCH ? 0x08 : 0xa0,read_command,IO_MB);
+		ReadHandler[3].Install(IS_PC98_ARCH ? 0x0A : 0xa1,read_data,IO_MB);
+		WriteHandler[2].Install(IS_PC98_ARCH ? 0x08 : 0xa0,write_command,IO_MB);
+		WriteHandler[3].Install(IS_PC98_ARCH ? 0x0A : 0xa1,write_data,IO_MB);
 	}
-};
-
-static PIC_8259A* test;
-
-void PIC_Destroy(Section* sec){
-	delete test;
-}
-
-void PIC_Init(Section* sec) {
-	test = new PIC_8259A(sec);
-	sec->AddDestroyFunction(&PIC_Destroy);
-}
-
-
-
-
-// PIC_EventHandlers
-extern void *cmos_timerevent_PIC_Event;						// Cmos.cpp
-extern void *DISNEY_disable_PIC_Event;						// Disney.cpp
-extern void *GUS_TimerEvent_PIC_Event;						// Gus.cpp
-extern void *IPX_AES_EventHandler_PIC_Event;			// Ipx.cpp
-extern void *KEYBOARD_TransferBuffer_PIC_Event;		// Keyboard.cpp
-extern void *MOUSE_Limit_Events_PIC_Event;				// Mouse.cpp
-extern void *MPU401_Event_PIC_Event;							// Mpu401.cpp
-extern void *DMA_Silent_Event_PIC_Event;					// Sblaster.cpp
-extern void *DSP_FinishReset_PIC_Event;
-extern void *DSP_RaiseIRQEvent_PIC_Event;
-extern void *END_DMA_Event_PIC_Event;
-extern void *MAPPER_RunEvent_PIC_Event;						// Sdl_mapper.cpp
-extern void *Serial_EventHandler_PIC_Event;				// Serialport.cpp
-extern void *delayed_press_PIC_Event;							// Shell_cmds.cpp
-extern void *delayed_release_PIC_Event;
-extern void *PIT0_Event_PIC_Event;								// Timer.cpp
-extern void *VGA_DisplayStartLatch_PIC_Event;			// Vga.cpp
-extern void *VGA_DrawEGASingleLine_PIC_Event;
-//extern void *VGA_DrawPart_PIC_Event;
-extern void *VGA_DrawSingleLine_PIC_Event;
-extern void *VGA_Other_VertInterrupt_PIC_Event;
-extern void *VGA_PanningLatch_PIC_Event;
-extern void *VGA_SetupDrawing_PIC_Event;
-extern void *VGA_VertInterrupt_PIC_Event;
-extern void *VGA_VerticalTimer_PIC_Event;
-extern void *Voodoo_UpdateScreen_PIC_Event;				// Voodoo_main.cpp
-extern void *Voodoo_VerticalTimer_PIC_Event;
-
-#if C_NE2000
-extern void *NE2000_TX_Event_PIC_Event;						// Ne2000.cpp
-#endif
-
-
-// PIC_TimerHandlers
-extern void *IPX_ClientLoop_PIC_Timer;						// Ipx.cpp
-extern void *IPX_ServerLoop_PIC_Timer;						// Ipxserver.cpp
-extern void *KEYBOARD_TickHandler_PIC_Timer;			// Keyboard.cpp
-extern void *KEYBOARD_TickHandler_PIC_Timer;			// Keyboard.cpp
-extern void *MIXER_Mix_NoSound_PIC_Timer;					// Mixer.cpp
-extern void *MIXER_Mix_PIC_Timer;
-
-#if C_NE2000
-extern void *NE2000_Poller_PIC_Event;							// Ne2000.cpp
-#endif
-
-
-const void *pic_state_event_table[] = {
-	NULL,
-	cmos_timerevent_PIC_Event,
-	DISNEY_disable_PIC_Event,
-	GUS_TimerEvent_PIC_Event,
-	IPX_AES_EventHandler_PIC_Event,
-	KEYBOARD_TransferBuffer_PIC_Event,
-	MOUSE_Limit_Events_PIC_Event,
-	MPU401_Event_PIC_Event,
-	DMA_Silent_Event_PIC_Event,
-	DSP_FinishReset_PIC_Event,
-	DSP_RaiseIRQEvent_PIC_Event,
-	END_DMA_Event_PIC_Event,
-	MAPPER_RunEvent_PIC_Event,
-	END_DMA_Event_PIC_Event,
-	Serial_EventHandler_PIC_Event,
-	delayed_press_PIC_Event,
-	delayed_release_PIC_Event,
-	PIT0_Event_PIC_Event,
-	VGA_DisplayStartLatch_PIC_Event,
-	VGA_DrawEGASingleLine_PIC_Event,
-	//VGA_DrawPart_PIC_Event,
-	VGA_DrawSingleLine_PIC_Event,
-	VGA_Other_VertInterrupt_PIC_Event,
-	VGA_PanningLatch_PIC_Event,
-	VGA_SetupDrawing_PIC_Event,
-	VGA_VertInterrupt_PIC_Event,
-	VGA_VerticalTimer_PIC_Event,
-	Voodoo_UpdateScreen_PIC_Event,
-	Voodoo_VerticalTimer_PIC_Event,
-
-#if C_NE2000
-	NE2000_TX_Event_PIC_Event,
-#endif
-};
-
-
-const void *pic_state_timer_table[] = {
-	NULL,
-	IPX_ClientLoop_PIC_Timer,
-	IPX_ServerLoop_PIC_Timer,
-	KEYBOARD_TickHandler_PIC_Timer,
-	KEYBOARD_TickHandler_PIC_Timer,
-	MIXER_Mix_NoSound_PIC_Timer,
-	MIXER_Mix_PIC_Timer,
-
-#if C_NE2000
-	NE2000_Poller_PIC_Event,
-#endif
-};
-
-
-
-Bit16u PIC_State_FindEvent( Bit32u addr ) {
-	int size;
-
-	size = sizeof(pic_state_event_table) / sizeof(Bit32u);
-	for( int lcv=0; lcv<size; lcv++ ) {
-		if( addr == (Bit32u) (uintptr_t) (pic_state_event_table[lcv]) ) return lcv;
+	else if (!IS_PC98_ARCH && enable_pc_xt_nmi_mask) {
+		PCXT_NMI_WriteHandler.Install(0xa0,pc_xt_nmi_write,IO_MB);
 	}
-
-
-	// ERROR!! (place debug breakpoint here)
-	//MessageBox(0,"PIC - State FindEvent",0,0);
-	return 0xffff;
 }
 
+void PIC_Destroy(Section* sec) {
+}
 
-Bit16u PIC_State_FindTimer( Bit32u addr ) {
-	int size;
+void PIC_EnterPC98_Phase1(Section* sec) {
+	ReadHandler[0].Uninstall();
+	ReadHandler[1].Uninstall();
+	WriteHandler[0].Uninstall();
+	WriteHandler[1].Uninstall();
+	ReadHandler[2].Uninstall();
+	ReadHandler[3].Uninstall();
+	WriteHandler[2].Uninstall();
+	WriteHandler[3].Uninstall();
+	PCXT_NMI_WriteHandler.Uninstall();
+}
 
-	size = sizeof(pic_state_timer_table) / sizeof(Bit32u);
-	for( int lcv=0; lcv<size; lcv++ ) {
-		if( addr == (Bit32u) (uintptr_t) (pic_state_timer_table[lcv]) ) return lcv;
+void PIC_EnterPC98_Phase2(Section* sec) {
+    PIC_Reset(sec);
+}
+
+void Init_PIC() {
+	Bitu i;
+
+	LOG(LOG_MISC,LOG_DEBUG)("Init_PIC()");
+
+	/* Initialize the pic queue */
+	for (i=0;i<PIC_QUEUESIZE-1;i++) {
+		pic_queue.entries[i].next=&pic_queue.entries[i+1];
+
+		// savestate compatibility
+		pic_queue.entries[i].pic_event = 0;
 	}
+	pic_queue.entries[PIC_QUEUESIZE-1].next=0;
+	pic_queue.free_entry=&pic_queue.entries[0];
+	pic_queue.next_entry=0;
 
-
-	// ERROR!! (place debug breakpoint here)
-	//MessageBox(0,"PIC - State FindTimer",0,0);
-	return 0xffff;
+	AddExitFunction(AddExitFunctionFuncPair(PIC_Destroy));
+	AddVMEventFunction(VM_EVENT_RESET,AddVMEventFunctionFuncPair(PIC_Reset));
+	AddVMEventFunction(VM_EVENT_ENTER_PC98_MODE,AddVMEventFunctionFuncPair(PIC_EnterPC98_Phase1));
+	AddVMEventFunction(VM_EVENT_ENTER_PC98_MODE_END,AddVMEventFunctionFuncPair(PIC_EnterPC98_Phase2));
 }
 
-
-Bit32u PIC_State_IndexEvent( Bit16u index ) {
-	if( index == 0xffff ) return 0;
-
-	return (Bit32u) (uintptr_t) (pic_state_event_table[index]);
-}
-
-
-Bit32u PIC_State_IndexTimer( Bit16u index ) {
-	if( index == 0xffff ) return 0;
-
-	return (Bit32u) (uintptr_t) (pic_state_timer_table[index]);
-}
-
-
-//save state support
-namespace
-{
-class SerializePic : public SerializeGlobalPOD
-{
-public:
-		SerializePic() : SerializeGlobalPOD("Pic")
-    {}
-
-private:
-    virtual void getBytes(std::ostream& stream)
-    {
-				Bit16u pic_free_idx, pic_next_idx;
-				Bit16u pic_next_ptr[PIC_QUEUESIZE];
-				
-				TickerBlock *ticker_ptr;
-				Bit16u ticker_size;
-				Bit16u ticker_handler_idx;
-
-
-				for( int lcv=0; lcv<PIC_QUEUESIZE; lcv++ ) {
-					Bit32u pic_addr;
-
-					pic_addr = (Bit32u) (uintptr_t) pic_queue.entries[lcv].next;
-					pic_next_ptr[lcv] = 0xffff;
-
-					for( int lcv2=0; lcv2<PIC_QUEUESIZE; lcv2++ ) {
-						if( pic_addr == (Bit32u) (uintptr_t) &pic_queue.entries[lcv2] ) {
-							pic_next_ptr[lcv] = lcv2;
-							break;
-						}
-					}
-				}
-
-
-				ticker_size = 0;
-				ticker_ptr = firstticker;
-				while( ticker_ptr != NULL ) {
-					ticker_ptr = ticker_ptr->next;
-					ticker_size++;
-				}
-
-				// ***************************************************
-				// ***************************************************
-				// ***************************************************
-
-        SerializeGlobalPOD::getBytes(stream);
-
-
-				// - data
-        stream.write(reinterpret_cast<const char*>(&PIC_Ticks), sizeof(PIC_Ticks) );
-        stream.write(reinterpret_cast<const char*>(&PIC_IRQCheck), sizeof(PIC_IRQCheck) );
-        //stream.write(reinterpret_cast<const char*>(&PIC_IRQOnSecondPicActive), sizeof(PIC_IRQOnSecondPicActive) );
-        //stream.write(reinterpret_cast<const char*>(&PIC_IRQActive), sizeof(PIC_IRQActive) );
-
-				// - data structs
-        //stream.write(reinterpret_cast<const char*>(&irqs), sizeof(irqs) );
-        stream.write(reinterpret_cast<const char*>(&pics), sizeof(pics) );
-
-
-				pic_free_idx = 0xffff;
-				pic_next_idx = 0xffff;
-				for( int lcv=0; lcv<PIC_QUEUESIZE; lcv++ ) {
-					Bit16u event_idx;
-
-					// - data
-					stream.write(reinterpret_cast<const char*>(&pic_queue.entries[lcv].index), sizeof(pic_queue.entries[lcv].index) );
-					stream.write(reinterpret_cast<const char*>(&pic_queue.entries[lcv].value), sizeof(pic_queue.entries[lcv].value) );
-
-					// - function ptr
-					event_idx = PIC_State_FindEvent( (Bit32u) (uintptr_t) (pic_queue.entries[lcv].pic_event) );
-					stream.write(reinterpret_cast<const char*>(&event_idx), sizeof(event_idx) );
-
-					// - reloc ptr
-					stream.write(reinterpret_cast<const char*>(&pic_next_ptr[lcv]), sizeof(pic_next_ptr[lcv]) );
-
-
-					if( &pic_queue.entries[lcv] == pic_queue.free_entry ) pic_free_idx = lcv;
-					if( &pic_queue.entries[lcv] == pic_queue.next_entry ) pic_next_idx = lcv;
-				}
-
-				// - reloc ptrs
-        stream.write(reinterpret_cast<const char*>(&pic_free_idx), sizeof(pic_free_idx) );
-        stream.write(reinterpret_cast<const char*>(&pic_next_idx), sizeof(pic_next_idx) );
-
-
-				// - data
-        stream.write(reinterpret_cast<const char*>(&InEventService), sizeof(InEventService) );
-        stream.write(reinterpret_cast<const char*>(&srv_lag), sizeof(srv_lag) );
-        //stream.write(reinterpret_cast<const char*>(&PIC_Special_Mode), sizeof(PIC_Special_Mode) );
-
-
-				// - reloc ptr
-        stream.write(reinterpret_cast<const char*>(&ticker_size), sizeof(ticker_size) );
-
-				ticker_ptr = firstticker;
-				for( int lcv=0; lcv<ticker_size; lcv++ ) {
-					// - function ptr
-					ticker_handler_idx = PIC_State_FindTimer( (Bit32u) (uintptr_t) (ticker_ptr->handler) );
-					stream.write(reinterpret_cast<const char*>(&ticker_handler_idx), sizeof(ticker_handler_idx) );
-
-					// - reloc new ptr (leave alone)
-					//stream.write(reinterpret_cast<const char*>(&ticker_ptr->next), sizeof(ticker_ptr->next) );
-
-					ticker_ptr = ticker_ptr->next;
-				}
-
-
-				// - system (leave alone)
-        //stream.write(reinterpret_cast<const char*>(&PIC_benchstart), sizeof(PIC_benchstart) );
-        //stream.write(reinterpret_cast<const char*>(&PIC_tickstart), sizeof(PIC_tickstart) );
-
-				// - static (leave alone)
-				//test->saveState(stream);
-		}
-
-    virtual void setBytes(std::istream& stream)
-    {
-				Bit16u free_idx, next_idx;
-				Bit16u ticker_size;
-
-
-        SerializeGlobalPOD::setBytes(stream);
-
-
-				// - data
-        stream.read(reinterpret_cast<char*>(&PIC_Ticks), sizeof(PIC_Ticks) );
-        stream.read(reinterpret_cast<char*>(&PIC_IRQCheck), sizeof(PIC_IRQCheck) );
-        //stream.read(reinterpret_cast<char*>(&PIC_IRQOnSecondPicActive), sizeof(PIC_IRQOnSecondPicActive) );
-        //stream.read(reinterpret_cast<char*>(&PIC_IRQActive), sizeof(PIC_IRQActive) );
-
-				// - data structs
-        //stream.read(reinterpret_cast<char*>(&irqs), sizeof(irqs) );
-        stream.read(reinterpret_cast<char*>(&pics), sizeof(pics) );
-
-
-				for( int lcv=0; lcv<PIC_QUEUESIZE; lcv++ ) {
-					Bit16u event_idx, next_idx;
-
-					// - data
-					stream.read(reinterpret_cast<char*>(&pic_queue.entries[lcv].index), sizeof(pic_queue.entries[lcv].index) );
-					stream.read(reinterpret_cast<char*>(&pic_queue.entries[lcv].value), sizeof(pic_queue.entries[lcv].value) );
-
-
-					// - function ptr
-					stream.read(reinterpret_cast<char*>(&event_idx), sizeof(event_idx) );
-					pic_queue.entries[lcv].pic_event = (PIC_EventHandler) PIC_State_IndexEvent( event_idx );
-
-
-					// - reloc ptr
-					stream.read(reinterpret_cast<char*>(&next_idx), sizeof(next_idx) );
-
-					pic_queue.entries[lcv].next = NULL;
-					if( next_idx != 0xffff )
-						pic_queue.entries[lcv].next = &pic_queue.entries[next_idx];
-				}
-
-				// - reloc ptrs
-        stream.read(reinterpret_cast<char*>(&free_idx), sizeof(free_idx) );
-        stream.read(reinterpret_cast<char*>(&next_idx), sizeof(next_idx) );
-
-				pic_queue.free_entry = NULL;
-				if( free_idx != 0xffff )
-					pic_queue.free_entry = &pic_queue.entries[free_idx];
-
-				pic_queue.next_entry = NULL;
-				if( next_idx != 0xffff )
-					pic_queue.next_entry = &pic_queue.entries[next_idx];
-
-
-				// - data
-        stream.read(reinterpret_cast<char*>(&InEventService), sizeof(InEventService) );
-        stream.read(reinterpret_cast<char*>(&srv_lag), sizeof(srv_lag) );
-        //stream.read(reinterpret_cast<char*>(&PIC_Special_Mode), sizeof(PIC_Special_Mode) );
-
-
-				// 1- wipe old data
-				// 2- insert new data
-				while( firstticker != NULL ) {
-					TickerBlock *ticker_ptr;
-
-					ticker_ptr = firstticker;
-					firstticker = firstticker->next;
-
-					delete ticker_ptr;
-				}
-
-
-				// - reloc ptr
-        stream.read(reinterpret_cast<char*>(&ticker_size), sizeof(ticker_size) );
-
-				firstticker = NULL;
-				if( ticker_size ) {
-					TickerBlock *ticker_ptr;
-
-					for( int lcv = 0; lcv<ticker_size; lcv++ ) {
-						Bit16u ticker_idx;
-
-						if( lcv == 0 ) {
-							ticker_ptr = new TickerBlock;
-							firstticker = ticker_ptr;
-						}
-						else {
-							ticker_ptr->next = new TickerBlock;
-							ticker_ptr = ticker_ptr->next;
-						}
-
-
-						// - function ptr
-						stream.read(reinterpret_cast<char*>(&ticker_idx), sizeof(ticker_idx) );
-						ticker_ptr->handler = (TIMER_TickHandler) PIC_State_IndexTimer( ticker_idx );
-
-						// - reloc new ptr (linked list)
-						ticker_ptr->next = NULL;
-					}
-				}
-
-
-				// - system (leave alone)
-        //stream.read(reinterpret_cast<char*>(&PIC_benchstart), sizeof(PIC_benchstart) );
-        //stream.read(reinterpret_cast<char*>(&PIC_tickstart), sizeof(PIC_tickstart) );
-
-				// - static (leave alone)
-				//test->loadState(stream);
-    }
-} dummy;
-}
-
-
-/*
-2012-02-20 (PIC globals):
-
-// - pure data (probably should save this)
-Bitu PIC_Ticks;
-
-// - pure data (ActivateIRQ / Deactivate IRQ)
-Bitu PIC_IRQCheck;
-Bitu PIC_IRQOnSecondPicActive;
-Bitu PIC_IRQActive;
-
-// - pure data blocks
-static IRQ_Block irqs[16];
-static PIC_Controller pics[2];
-
-
-// - reloc ptrs
-struct pic_queue
-- PICEntry entries[PIC_QUEUESIZE];
-- PICEntry * free_entry;
-- PICEntry * next_entry;
-
-struct PICEntry {
-	// - data
-	float index;
-	Bitu value;
-
-	// - function ptr
-	PIC_EventHandler pic_event;
-
-	// - reloc ptr
-	PICEntry * next;
-};
-
-
-// - pure data
-static bool InEventService;
-static float srv_lag;
-static bool PIC_Special_Mode;
-
-
-// - reloc (new) (reloc ptr + reloc data)
-static TickerBlock * firstticker
-- TIMER_TickHandler handler;
-- TickerBlock * next;
-
-
-// - system (performance)
-static unsigned long PIC_benchstart;
-static unsigned long PIC_tickstart;
-
-
-
-// - static (init constructor) (leave alone)
-class PIC:public Module_base{
-private:
-	IO_ReadHandleObject ReadHandler[4];
-	IO_WriteHandleObject WriteHandler[4];
-
-
-
-// - static'ish
-static PIC* test;
-
-
-
-
-WARNINGS:
-
-CPU cycle depletion (avoid this?)
-- write_command
-- write_data
-- PIC_ActivateIRQ
-- PIC_SetIRQMask
-- PIC_AddEntry
-- TIMER_AddTick
-*/

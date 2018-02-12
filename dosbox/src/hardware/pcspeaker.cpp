@@ -15,6 +15,13 @@
  *  along with this program; if not, write to the Free Software
  *  Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  */
+/* FIXME: This code... well... it could be done better.
+ *        It was written back when all mixer callbacks were potentially done from
+ *        the SDL audio thread. DOSBox-X has since moved to a model where within
+ *        the timer tick, audio can be rendered up to the "current time" at any
+ *        time. So while the event queue idea was appropriate at the time, it's
+ *        no longer needed and just like the GUS and SB code could be written to
+ *        trigger a mixer render "up-to" for every change instead. --J.C. */
  
 //#define SPKR_DEBUGGING
 #include <math.h>
@@ -23,8 +30,7 @@
 #include "timer.h"
 #include "setup.h"
 #include "pic.h"
-#include "../save_state.h"
-
+#include "control.h"
 
 #ifdef SPKR_DEBUGGING
 FILE* PCSpeakerLog = NULL;
@@ -103,6 +109,7 @@ inline static void AddDelayEntry(float index, bool new_output_level) {
 	}
 	previous_output_level = new_output_level;
 	if (spkr.used == SPKR_ENTRIES) {
+        LOG(LOG_MISC,LOG_WARN)("PC speaker delay entry queue overrun");
 		return;
 	}
 	spkr.entries[spkr.used].index=index;
@@ -261,6 +268,9 @@ void PCSPEAKER_SetPITControl(Bitu mode) {
 #endif
 	// TODO: implement all modes
 	switch(mode) {
+    case 0:
+		spkr.pit_mode = 0;
+        break;
 	case 1:
 		spkr.pit_mode = 1;
 		spkr.pit_mode1_waiting_for_counter = 1;
@@ -442,6 +452,17 @@ void PCSPEAKER_SetType(bool pit_clock_gate_enabled, bool pit_output_enabled) {
 	}
 }
 
+/* NTS: This code stinks. Sort of. The way it handles the delay entry queue
+ *      could have been done better. The event queue idea isn't needed anymore because
+ *      DOSBox-X allows any code to render audio "up to" the current time.
+ *
+ *      Second, looking at this code tells me why it didn't work properly with the
+ *      "sample accurate" mixer mode. This code assumes that whatever length of
+ *      audio there is to render, that all events within the 1ms tick interval are
+ *      to be squashed and stretched to fill it. In the new DOSBox-X model mixer
+ *      callback code must not assume the call is for 1ms of audio, because any
+ *      code at any time can trigger a mixer render "up to" the current time with
+ *      the tick. */
 static void PCSPEAKER_CallBack(Bitu len) {
 	Bit16s * stream=(Bit16s*)MixTemp;
 	ForwardPIT(1);
@@ -525,12 +546,28 @@ static void PCSPEAKER_CallBack(Bitu len) {
 		
 		}
 	}
-#ifdef SPKR_DEBUGGING
-	if (spkr.used) {
-		LOG_MSG("PCSPEAKER_CallBack: DelayEntries not emptied (%u) at %f", spkr.used, PIC_FullIndex());
-	}
-#endif
+	if (spkr.used != 0) {
+        if (pos != 0) {
+            /* well then roll the queue back */
+            for (Bitu i=0;i < spkr.used;i++)
+                spkr.entries[i] = spkr.entries[pos+i];
+        }
 
+        /* hack: some indexes come out at 1.001, fix that for the next round.
+         *       this is a consequence of DOSBox-X allowing the CPU cycles
+         *       count use to overrun slightly for accuracy. if we DONT fix
+         *       this the delay queue will get stuck and PC speaker output
+         *       will stop. */
+        for (Bitu i=0;i < spkr.used;i++) {
+            if (spkr.entries[i].index >= 1.000)
+                spkr.entries[i].index -= 1.000;
+            else
+                break;
+        }
+
+        LOG(LOG_MISC,LOG_DEBUG)("PC speaker queue render, %u entries left, %u rendered",(unsigned int)spkr.used,(unsigned int)pos);
+        LOG(LOG_MISC,LOG_DEBUG)("Next entry waits for index %.3f, stopped at %.3f",spkr.entries[0].index,sample_base);
+	}
 }
 class PCSPEAKER:public Module_base {
 private:
@@ -585,142 +622,25 @@ public:
 		}
 #endif
 	}
-	~PCSPEAKER(){
-		Section_prop * section=static_cast<Section_prop *>(m_configuration);
-		if(!section->Get_bool("pcspeaker")) return;
-	}
 };
+
 static PCSPEAKER* test;
 
 void PCSPEAKER_ShutDown(Section* sec){
 	delete test;
 }
 
-void PCSPEAKER_Init(Section* sec) {
-	test = new PCSPEAKER(sec);
-	sec->AddDestroyFunction(&PCSPEAKER_ShutDown,true);
-}
-
-
-
-// save state support
-void POD_Save_PCSpeaker( std::ostream& stream )
-{
-	const char pod_name[32] = "PCSpeaker";
-
-	if( stream.fail() ) return;
-	if( !test ) return;
-	if( !spkr.chan ) return;
-
-
-	WRITE_POD( &pod_name, pod_name );
-
-	//*******************************************
-	//*******************************************
-	//*******************************************
-
-	// - near-pure data
-	WRITE_POD( &spkr, spkr );
-
-	// *******************************************
-	// *******************************************
-
-	spkr.chan->SaveState(stream);
-}
-
-
-void POD_Load_PCSpeaker( std::istream& stream )
-{
-	char pod_name[32] = {0};
-
-	if( stream.fail() ) return;
-	if( !test ) return;
-	if( !spkr.chan ) return;
-
-
-	// error checking
-	READ_POD( &pod_name, pod_name );
-	if( strcmp( pod_name, "PCSpeaker" ) ) {
-		stream.clear( std::istream::failbit | std::istream::badbit );
-		return;
+void PCSPEAKER_OnReset(Section* sec) {
+	if (test == NULL) {
+		LOG(LOG_MISC,LOG_DEBUG)("Allocating PC speaker emulation");
+		test = new PCSPEAKER(control->GetSection("speaker"));
 	}
-
-	//************************************************
-	//************************************************
-	//************************************************
-
-	MixerChannel *chan_old;
-
-
-	// - save static ptrs
-	chan_old = spkr.chan;
-
-	// *******************************************
-	// *******************************************
-
-	// - near-pure data
-	READ_POD( &spkr, spkr );
-
-	// *******************************************
-	// *******************************************
-
-	// - restore static ptrs
-	spkr.chan = chan_old;
-
-
-	spkr.chan->LoadState(stream);
 }
 
+void PCSPEAKER_Init() {
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing PC speaker");
 
-/*
-ykhwong svn-daum 2012-02-20
+	AddExitFunction(AddExitFunctionFuncPair(PCSPEAKER_ShutDown),true);
+	AddVMEventFunction(VM_EVENT_RESET,AddVMEventFunctionFuncPair(PCSPEAKER_OnReset));
+}
 
-
-static globals:
-
-
-
-static struct spkr
-	// - static ptr
-	MixerChannel * chan;
-
-
-	// - pure data
-	Bitu pit_mode;
-	Bitu rate;
-
-	// - pure data
-	bool  pit_output_enabled;
-	bool  pit_clock_gate_enabled;
-	bool  pit_output_level;
-	float pit_new_max,pit_new_half;
-	float pit_max,pit_half;
-	float pit_index;
-	bool  pit_mode1_waiting_for_counter;
-	bool  pit_mode1_waiting_for_trigger;
-	float pit_mode1_pending_max;
-
-	// - pure data
-	bool  pit_mode3_counting;
-	float volwant,volcur;
-	Bitu last_ticks;
-	float last_index;
-	Bitu minimum_counter;
-	DelayEntry entries[SPKR_ENTRIES];
-
-		// - pure data
-		struct DelayEntry {
-			float index;
-			bool output_level;
-		};
-
-	Bitu used;
-
-
-
-// - static ptr
-static PCSPEAKER* test;
-
-	// - static data
-	MixerObject MixerChan;
-*/

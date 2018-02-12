@@ -30,6 +30,8 @@
 
 int hack_lfb_yadjust = 0;
 
+extern int vesa_mode_width_cap;
+extern int vesa_mode_height_cap;
 extern bool allow_vesa_lowres_modes;
 extern bool vesa12_modes_32bpp;
 extern bool allow_vesa_32bpp;
@@ -52,12 +54,14 @@ static struct {
 	Bitu pmStart;
 	Bitu pmWindow;
 	Bitu pmPalette;
-} callback;
+} callback = {0};
+
+void CALLBACK_DeAllocate(Bitu in);
 
 static char string_oem[]="S3 Incorporated. Trio64";
 static char string_vendorname[]="DOSBox Development Team";
 static char string_productname[]="DOSBox - The DOS Emulator";
-static char string_productrev[]="DOSBox SVN-Daum";
+static char string_productrev[]="DOSBox SVN-X";
 
 #ifdef _MSC_VER
 #pragma pack (1)
@@ -101,7 +105,24 @@ struct MODE_INFO{
 #pragma pack()
 #endif
 
-
+void VESA_OnReset_Clear_Callbacks(void) {
+    if (callback.setwindow != 0) {
+        CALLBACK_DeAllocate(callback.setwindow);
+        callback.setwindow = 0;
+    }
+    if (callback.pmPalette != 0) {
+        CALLBACK_DeAllocate(callback.pmPalette);
+        callback.pmPalette = 0;
+    }
+    if (callback.pmStart != 0) {
+        CALLBACK_DeAllocate(callback.pmStart);
+        callback.pmStart = 0;
+    }
+    if (callback.pmWindow != 0) {
+        CALLBACK_DeAllocate(callback.pmWindow);
+        callback.pmWindow = 0;
+    }
+}
 
 Bit8u VESA_GetSVGAInformation(Bit16u seg,Bit16u off) {
 	/* Fill 256 byte buffer with VESA information */
@@ -275,7 +296,7 @@ foundit:
 	if (pageSize & 0xFFFF) {
 		// It is documented that many applications assume 64k-aligned page sizes
 		// VBETEST is one of them
-		pageSize += 0x10000;
+		pageSize +=  0xFFFF;
 		pageSize &= ~0xFFFF;
 	}
 	Bitu pages = 0;
@@ -585,6 +606,7 @@ static Bitu VESA_PMSetStart(void) {
 
 
 
+extern int vesa_modelist_cap;
 
 void INT10_SetupVESA(void) {
 	/* BUGFIX: Generating VESA BIOS data when machine=ega or machine=vgaonly is dumb.
@@ -593,23 +615,26 @@ void INT10_SetupVESA(void) {
 	if (svgaCard == SVGA_None) return;
 
 	/* Put the mode list somewhere in memory */
-	Bitu i;
+	Bitu i,modecount=0;
 	i=0;
 	int10.rom.vesa_modes=RealMake(0xc000,int10.rom.used);
 //TODO Maybe add normal vga modes too, but only seems to complicate things
 	while (ModeList_VGA[i].mode!=0xffff) {
 		bool canuse_mode=false;
-		if (!svga.accepts_mode)
-			canuse_mode=true;
+
 		/* Hack for VBE 1.2 modes and 24/32bpp ambiguity */
-		else if (ModeList_VGA[i].mode >= 0x100 && ModeList_VGA[i].mode <= 0x11F &&
+		if (ModeList_VGA[i].mode >= 0x100 && ModeList_VGA[i].mode <= 0x11F &&
 			((ModeList_VGA[i].type == M_LIN32 && !vesa12_modes_32bpp) ||
 			 (ModeList_VGA[i].type == M_LIN24 && vesa12_modes_32bpp))) {
 			/* ignore */
 		}
 		else {
-			if (svga.accepts_mode(ModeList_VGA[i].mode)) {
+			if (!svga.accepts_mode)
 				canuse_mode=true;
+			else if (svga.accepts_mode(ModeList_VGA[i].mode))
+				canuse_mode=true;
+
+			if (canuse_mode) {
 				if (ModeList_VGA[i].mode >= 0x100) {
 					bool allow_res = allow_vesa_lowres_modes ||
 						(ModeList_VGA[i].swidth >= 640 && ModeList_VGA[i].sheight >= 400);
@@ -622,16 +647,31 @@ void INT10_SetupVESA(void) {
 						case M_LIN8:	canuse_mode=allow_vesa_8bpp && allow_res; break;
 						case M_LIN4:	canuse_mode=allow_vesa_4bpp; break;
 						case M_TEXT:	canuse_mode=allow_vesa_tty; break;
+						default:	break;
 					}
 				}
 			}
 		}
+
+		if (canuse_mode && vesa_modelist_cap > 0 && (unsigned int)modecount >= (unsigned int)vesa_modelist_cap)
+			canuse_mode = false;
+
+		if (ModeList_VGA[i].type != M_TEXT) {
+			if (canuse_mode && vesa_mode_width_cap > 0 && (unsigned int)ModeList_VGA[i].swidth > (unsigned int)vesa_mode_width_cap)
+				canuse_mode = false;
+
+			if (canuse_mode && vesa_mode_height_cap > 0 && (unsigned int)ModeList_VGA[i].sheight > (unsigned int)vesa_mode_height_cap)
+				canuse_mode = false;
+		}
+
 		if (ModeList_VGA[i].mode>=0x100 && canuse_mode) {
 			if ((!int10.vesa_oldvbe) || (ModeList_VGA[i].mode<0x120)) {
 				phys_writew(PhysMake(0xc000,int10.rom.used),ModeList_VGA[i].mode);
 				int10.rom.used+=2;
+				modecount++;
 			}
 		}
+
 		i++;
 	}
 	phys_writew(PhysMake(0xc000,int10.rom.used),0xffff);
@@ -641,13 +681,7 @@ void INT10_SetupVESA(void) {
 	for (i=0;i<len;i++) {
 		phys_writeb(0xc0000+int10.rom.used++,string_oem[i]);
 	}
-	switch (svgaCard) {
-	case SVGA_S3Trio:
-		break;
-	}
 	callback.setwindow=CALLBACK_Allocate();
-	callback.pmPalette=CALLBACK_Allocate();
-	callback.pmStart=CALLBACK_Allocate();
 	CALLBACK_Setup(callback.setwindow,VESA_SetWindow,CB_RETF, "VESA Real Set Window");
 	/* Prepare the pmode interface */
 	int10.rom.pmode_interface=RealMake(0xc000,int10.rom.used);

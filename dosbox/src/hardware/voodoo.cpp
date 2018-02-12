@@ -24,6 +24,7 @@
 #include "config.h"
 #include "setup.h"
 #include "cross.h"
+#include "control.h"
 
 #include "paging.h"
 #include "mem.h"
@@ -32,12 +33,53 @@
 #include "pci_bus.h"
 #include "voodoo_interface.h"
 
-
 class VOODOO;
 static VOODOO* voodoo_dev;
 
 static Bit32u voodoo_current_lfb=(VOODOO_INITIAL_LFB&0xffff0000);
 
+static bool voodoo_pci_enabled = false;
+static MEM_Callout_t voodoo_lfb_cb = MEM_Callout_t_none;
+
+PageHandler* voodoo_lfb_memio_cb(MEM_CalloutObject &co,Bitu phys_page) {
+    if (voodoo_current_lfb == 0)
+        return NULL;
+
+    return VOODOO_GetPageHandler();
+}
+
+void voodoo_lfb_cb_free(void) {
+    if (voodoo_lfb_cb != MEM_Callout_t_none) {
+        MEM_FreeCallout(voodoo_lfb_cb);
+        voodoo_lfb_cb = MEM_Callout_t_none;
+    }
+}
+
+void voodoo_lfb_cb_init() {
+    if (voodoo_lfb_cb == MEM_Callout_t_none) {
+        voodoo_lfb_cb = MEM_AllocateCallout(MEM_TYPE_PCI);
+        if (voodoo_lfb_cb == MEM_Callout_t_none) E_Exit("Unable to allocate voodoo cb for LFB");
+    }
+
+    {
+        MEM_CalloutObject *cb = MEM_GetCallout(voodoo_lfb_cb);
+
+        assert(cb != NULL);
+
+        cb->Uninstall();
+
+        if (voodoo_current_lfb != 0 && voodoo_pci_enabled) {
+            /* VOODOO_PAGES is a power of two already */
+            LOG_MSG("VOODOO LFB now at %x",voodoo_current_lfb);
+            cb->Install(voodoo_current_lfb>>12UL,MEMMASK_Combine(MEMMASK_FULL,MEMMASK_Range(VOODOO_PAGES)),voodoo_lfb_memio_cb);
+        }
+        else {
+            LOG_MSG("VOODOO LFB disabled");
+        }
+
+        MEM_PutCallout(cb);
+    }
+}
 
 class VOODOO:public Module_base{
 private:
@@ -63,17 +105,8 @@ public:
 			emulation_type=0;
 		}
 
-		if (emulation_type<=0) return;
-
-
 		Bits card_type = 1;
-		bool max_voodoomem;
-		std::string voodoo_mem_str(section->Get_string("voodoomem"));
-		if (voodoo_mem_str=="max") {
-			max_voodoomem = true;
-		} else {
-			max_voodoomem = false;
-		}
+		bool max_voodoomem = true;
 
 		bool needs_pci_device = false;
 
@@ -157,11 +190,18 @@ void VOODOO_PCI_Enable(bool enable) {
 
 
 void VOODOO_PCI_SetLFB(Bit32u lfbaddr) {
-	voodoo_current_lfb=(lfbaddr&0xffff0000);
+    lfbaddr &= 0xFFFF0000UL;
+
+    if (lfbaddr == voodoo_current_lfb)
+        return;
+
+	voodoo_current_lfb = lfbaddr;
+    voodoo_lfb_cb_init();
 }
 
 bool VOODOO_PCI_CheckLFBPage(Bitu page) {
-	if ((page>=(voodoo_current_lfb>>12)) &&
+	if (voodoo_current_lfb != 0 &&
+        (page>=(voodoo_current_lfb>>12)) &&
 		(page<(voodoo_current_lfb>>12)+VOODOO_PAGES))
 		return true;
 	return false;
@@ -180,8 +220,19 @@ void VOODOO_Destroy(Section* /*sec*/) {
 	voodoo_dev=NULL;
 }
 
-void VOODOO_Init(Section* sec) {
-	voodoo_current_lfb=(VOODOO_INITIAL_LFB&0xffff0000);
-	voodoo_dev = new VOODOO(sec);
-	sec->AddDestroyFunction(&VOODOO_Destroy,true);
+void VOODOO_OnPowerOn(Section* /*sec*/) {
+	if (voodoo_dev == NULL) {
+        voodoo_pci_enabled = true;
+		voodoo_current_lfb=(VOODOO_INITIAL_LFB&0xffff0000);
+		voodoo_dev = new VOODOO(control->GetSection("pci"));
+
+        voodoo_lfb_cb_init();
+	}
+}
+
+void VOODOO_Init() {
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing Voodoo/3DFX emulation");
+
+	AddExitFunction(AddExitFunctionFuncPair(VOODOO_Destroy),true);
+	AddVMEventFunction(VM_EVENT_POWERON,AddVMEventFunctionFuncPair(VOODOO_OnPowerOn));
 }

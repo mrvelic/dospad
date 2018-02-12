@@ -22,12 +22,11 @@
 #include "mixer.h"
 #include "pic.h"
 #include "setup.h"
-#include "../save_state.h"
+#include "control.h"
 
 #include "reSID/sid.h"
 
-#define SID_FREQ 1022727
-//#define SID_FREQ 985248
+#define SID_FREQ 894886
 
 static struct {
 	SID2* sid;
@@ -58,7 +57,8 @@ static void INNOVA_CallBack(Bitu len) {
 
 	cycle_count delta_t = SID_FREQ*len/innova.rate;
 	short* buffer = (short*)MixTemp;
-	int bufindex = 0;
+	Bitu bufindex = 0;
+
 	while(delta_t && bufindex != len) {
 		bufindex += innova.sid->clock(delta_t, buffer+bufindex, len-bufindex);
 	}
@@ -111,117 +111,36 @@ public:
 	}
 };
 
-static INNOVA* test;
+static INNOVA* test = NULL;
 
 static void INNOVA_ShutDown(Section* sec){
-	delete test;
+    if (test != NULL) {
+        delete test;
+        test = NULL;
+    }
 }
 
-void INNOVA_Init(Section* sec) {
-	test = new INNOVA(sec);
-	sec->AddDestroyFunction(&INNOVA_ShutDown,true);
+static void INNOVA_OnEnterPC98(Section* sec){
+    /* No such device on PC-98 */
+    if (test != NULL) {
+        delete test;
+        test = NULL;
+    }
 }
 
-
-
-// save state support
-void POD_Save_Innova( std::ostream& stream )
-{
-	const char pod_name[32] = "Innova";
-
-	if( stream.fail() ) return;
-	if( !test ) return;
-	if( !innova.chan ) return;
-
-
-	WRITE_POD( &pod_name, pod_name );
-
-	//*******************************************
-	//*******************************************
-	//*******************************************
-
-	// - pure data
-	WRITE_POD( &innova.rate, innova.rate );
-	WRITE_POD( &innova.basePort, innova.basePort );
-	WRITE_POD( &innova.last_used, innova.last_used );
-
-
-	innova.sid->SaveState(stream);
-
-	// *******************************************
-	// *******************************************
-	// *******************************************
-
-	innova.chan->SaveState(stream);
-}
-
-
-void POD_Load_Innova( std::istream& stream )
-{
-	char pod_name[32] = {0};
-
-	if( stream.fail() ) return;
-	if( !test ) return;
-	if( !innova.chan ) return;
-
-
-	// error checking
-	READ_POD( &pod_name, pod_name );
-	if( strcmp( pod_name, "Innova" ) ) {
-		stream.clear( std::istream::failbit | std::istream::badbit );
-		return;
+void INNOVA_OnReset(Section *sec) {
+	if (test == NULL) {
+		LOG(LOG_MISC,LOG_DEBUG)("Allocating Innova emulation");
+		test = new INNOVA(control->GetSection("innova"));
 	}
-
-	//************************************************
-	//************************************************
-	//************************************************
-
-	MixerChannel *chan_old;
-
-
-	// - save static ptrs
-	chan_old = innova.chan;
-
-	// *******************************************
-	// *******************************************
-	// *******************************************
-
-	// - pure data
-	READ_POD( &innova.rate, innova.rate );
-	READ_POD( &innova.basePort, innova.basePort );
-	READ_POD( &innova.last_used, innova.last_used );
-
-
-	innova.sid->LoadState(stream);
-
-	// *******************************************
-	// *******************************************
-	// *******************************************
-
-	// - restore static ptrs
-	innova.chan = chan_old;
-
-
-	innova.chan->LoadState(stream);
 }
 
+void INNOVA_Init() {
+	LOG(LOG_MISC,LOG_DEBUG)("Initializing INNOVA emulation");
 
-/*
-ykhwong svn-daum 2012-02-20
+	AddExitFunction(AddExitFunctionFuncPair(INNOVA_ShutDown),true);
+	AddVMEventFunction(VM_EVENT_RESET,AddVMEventFunctionFuncPair(INNOVA_OnReset));
 
+	AddVMEventFunction(VM_EVENT_ENTER_PC98_MODE,AddVMEventFunctionFuncPair(INNOVA_OnEnterPC98));
+}
 
-static globals:
-
-
-static struct innova
-	// - static ptr
-	SID2* sid;
-
-	// - pure data
-	Bitu rate;
-	Bitu basePort;
-	Bitu last_used;
-
-	// - static ptr
-	MixerChannel * chan;
-*/

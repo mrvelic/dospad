@@ -29,13 +29,20 @@ void vga_write_p3d4(Bitu port,Bitu val,Bitu iolen);
 Bitu vga_read_p3d4(Bitu port,Bitu iolen);
 void vga_write_p3d5(Bitu port,Bitu val,Bitu iolen);
 Bitu vga_read_p3d5(Bitu port,Bitu iolen);
-#if defined(WIN32) && !(C_DEBUG)
-void DISP2_RegisterPorts(void);
-bool DISP2_Active(void);
-#endif
+
+/* allow the user to specify that undefined bits in 3DA/3BA be set to some nonzero value.
+ * this is needed for "JOOP #2" by Europe demo, which has some weird retrace tracking code
+ * like this:
+ *
+ *        in    al,dx       ; <- dx = 3DAh
+ * l1:    shr   al,1        ; AL >>= 1, CF = bit shifted out
+ *        jnc   l1
+ *
+ * of course, if AL == 0, it becomes an infinite loop. this is why this option exists. */
+unsigned char vga_p3da_undefined_bits = 0;
 
 Bitu vga_read_p3da(Bitu port,Bitu iolen) {
-	Bit8u retval=0;
+	Bit8u retval = vga_p3da_undefined_bits;
 	double timeInFrame = PIC_FullIndex()-vga.draw.delay.framestart;
 
 	vga.internal.attrindex=false;
@@ -45,18 +52,20 @@ Bitu vga_read_p3da(Bitu port,Bitu iolen) {
 	// bit   0  Horizontal or Vertical blanking
 	//       3  Vertical sync
 
-	if (timeInFrame >= vga.draw.delay.vrstart &&
-		timeInFrame <= vga.draw.delay.vrend)
-		retval |= 8;
 	if (timeInFrame >= vga.draw.delay.vdend) {
-		retval |= 1;
+		retval |= 1; // vertical blanking
 	} else {
 		double timeInLine=fmod(timeInFrame,vga.draw.delay.htotal);
 		if (timeInLine >= vga.draw.delay.hblkstart && 
 			timeInLine <= vga.draw.delay.hblkend) {
-			retval |= 1;
+			retval |= 1; // horizontal blanking
 		}
 	}
+
+    if (timeInFrame >= vga.draw.delay.vrstart &&
+        timeInFrame <= vga.draw.delay.vrend) {
+        retval |= 8; // vertical retrace
+    }
 
 	vsync_poll_debug_notify();
 	return retval;
@@ -73,23 +82,6 @@ static void write_p3c2(Bitu port,Bitu val,Bitu iolen) {
 		IO_RegisterWriteHandler(0x3d5,vga_write_p3d5,IO_MB);
 		IO_RegisterReadHandler(0x3d5,vga_read_p3d5,IO_MB);
 
-#if defined(WIN32) && !(C_DEBUG)
-		if (!DISP2_Active()) {
-			IO_FreeWriteHandler(0x3b4,IO_MB);
-			IO_FreeReadHandler(0x3b4,IO_MB);
-			IO_FreeWriteHandler(0x3b5,IO_MB);
-			IO_FreeReadHandler(0x3b5,IO_MB);
-			IO_FreeReadHandler(0x3ba,IO_MB);
-		}
-	} else {
-		if (!DISP2_Active()) {
-			IO_RegisterWriteHandler(0x3b4,vga_write_p3d4,IO_MB);
-			IO_RegisterReadHandler(0x3b4,vga_read_p3d4,IO_MB);
-			IO_RegisterWriteHandler(0x3b5,vga_write_p3d5,IO_MB);
-			IO_RegisterReadHandler(0x3b5,vga_read_p3d5,IO_MB);
-			IO_RegisterReadHandler(0x3ba,vga_read_p3da,IO_MB);
-		}
-#else
 		IO_FreeWriteHandler(0x3b4,IO_MB);
 		IO_FreeReadHandler(0x3b4,IO_MB);
 		IO_FreeWriteHandler(0x3b5,IO_MB);
@@ -102,8 +94,6 @@ static void write_p3c2(Bitu port,Bitu val,Bitu iolen) {
 
 		IO_RegisterWriteHandler(0x3b5,vga_write_p3d5,IO_MB);
 		IO_RegisterReadHandler(0x3b5,vga_read_p3d5,IO_MB);
-#endif
-
 
 		IO_FreeWriteHandler(0x3d4,IO_MB);
 		IO_FreeReadHandler(0x3d4,IO_MB);
@@ -185,15 +175,26 @@ void VGA_SetupMisc(void) {
 	} else if (machine==MCH_CGA || machine==MCH_AMSTRAD || IS_TANDY_ARCH) {
 		IO_RegisterReadHandler(0x3da,vga_read_p3da,IO_MB);
 	}
-#if defined(WIN32) && !(C_DEBUG)
-	DISP2_RegisterPorts();
-#endif
 }
 
+void VGA_UnsetupMisc(void) {
+    IO_FreeWriteHandler(0x3b4,IO_MB);
+    IO_FreeReadHandler(0x3b4,IO_MB);
+    IO_FreeWriteHandler(0x3b5,IO_MB);
+    IO_FreeReadHandler(0x3b5,IO_MB);
+    IO_FreeWriteHandler(0x3c2,IO_MB);
+    IO_FreeReadHandler(0x3c2,IO_MB);
+    IO_FreeWriteHandler(0x3c8,IO_MB);
+    IO_FreeReadHandler(0x3c8,IO_MB);
+    IO_FreeWriteHandler(0x3ca,IO_MB);
+    IO_FreeReadHandler(0x3ca,IO_MB);
+    IO_FreeWriteHandler(0x3cc,IO_MB);
+    IO_FreeReadHandler(0x3cc,IO_MB);
+    IO_FreeWriteHandler(0x3d4,IO_MB);
+    IO_FreeReadHandler(0x3d4,IO_MB);
+    IO_FreeWriteHandler(0x3d5,IO_MB);
+    IO_FreeReadHandler(0x3d5,IO_MB);
+    IO_FreeWriteHandler(0x3da,IO_MB);
+    IO_FreeReadHandler(0x3da,IO_MB);
+}
 
-
-/*
-ykhwong svn-daum 2012-02-20
-
-static globals: none
-*/

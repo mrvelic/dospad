@@ -20,7 +20,6 @@
 #include "inout.h"
 #include "render.h"
 #include "vga.h"
-#include "../save_state.h"
 
 extern bool vga_enable_3C6_ramdac;
 
@@ -54,19 +53,54 @@ Note:  Each read or write of this register will cycle through first the
 enum {DAC_READ,DAC_WRITE};
 
 static void VGA_DAC_SendColor( Bitu index, Bitu src ) {
+	/* NTS: Don't forget red/green/blue are 6-bit RGB not 8-bit RGB */
 	const Bit8u red = vga.dac.rgb[src].red;
 	const Bit8u green = vga.dac.rgb[src].green;
 	const Bit8u blue = vga.dac.rgb[src].blue;
 
-	vga.dac.xlat32[index] = (blue<<2) | (green<<(2+8)) | (red<<(2+16)) | 0xFF000000;
-	vga.dac.xlat16[index] = ((blue>>1)&0x1f) | (((green)&0x3f)<<5) | (((red>>1)&0x1f) << 11);
+	if (GFX_bpp >= 24) /* FIXME: Assumes 8:8:8. What happens when desktops start using the 10:10:10 format? */
+		vga.dac.xlat32[index] = (blue<<(2+GFX_Bshift)) | (green<<(2+GFX_Gshift)) | (red<<(2+GFX_Rshift)) | GFX_Amask;
+	else {
+        /* FIXME: Assumes 5:6:5. I need to test against 5:5:5 format sometime. Perhaps I could dig out some older VGA cards and XFree86 drivers that support that format? */
+		vga.dac.xlat16[index] = ((((blue&0x3f)>>1)<<GFX_Bshift)) | ((green&0x3f)<<GFX_Gshift) | (((red&0x3f)>>1)<<GFX_Rshift) | GFX_Amask;
+
+        /* PC-98 mode always renders 32bpp, therefore needs this fix */
+        if (GFX_Bshift == 0)
+            vga.dac.xlat32[index] = (blue << 2U) | (green << 10U) | (red << 18U);
+        else
+            vga.dac.xlat32[index] = (blue << 18U) | (green << 10U) | (red << 2U);
+    }
 
 	RENDER_SetPal( index, (red << 2) | ( red >> 4 ), (green << 2) | ( green >> 4 ), (blue << 2) | ( blue >> 4 ) );
 }
 
-static void VGA_DAC_UpdateColor( Bitu index ) {
-	Bitu maskIndex = index & vga.dac.pel_mask;
-	VGA_DAC_SendColor( index, maskIndex );
+void VGA_DAC_UpdateColor( Bitu index ) {
+	Bitu maskIndex;
+
+    if (IS_EGA_ARCH) {
+        VGA_DAC_SendColor( index, index );
+        return;
+    }
+
+	switch (vga.mode) {
+		case M_VGA:
+		case M_LIN8:
+			maskIndex = index & vga.dac.pel_mask;
+			VGA_DAC_SendColor( index, maskIndex );
+			break;
+		default:
+			/* Remember the lookup table is there to handle the color palette AND the DAC mask AND the attribute controller palette */
+			/* FIXME: Is it: index -> attribute controller -> dac mask, or
+			 *               index -> dac mask -> attribute controller? */
+			maskIndex = vga.dac.combine[index&0xF] & vga.dac.pel_mask;
+			VGA_DAC_SendColor( index, maskIndex );
+			break;
+	}
+}
+
+void VGA_DAC_UpdateColorPalette() {
+	for ( Bitu i = 0;i<256;i++) 
+		VGA_DAC_UpdateColor( i );
 }
 
 void write_p3c6(Bitu port,Bitu val,Bitu iolen) {
@@ -77,10 +111,9 @@ void write_p3c6(Bitu port,Bitu val,Bitu iolen) {
 		return;
 	}
 	if ( vga.dac.pel_mask != val ) {
-		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:DCA:Pel Mask set to %X", val);
+		LOG(LOG_VGAMISC,LOG_NORMAL)("VGA:DCA:Pel Mask set to %X", (int)val);
 		vga.dac.pel_mask = val;
-		for ( Bitu i = 0;i<256;i++) 
-			VGA_DAC_UpdateColor( i );
+		VGA_DAC_UpdateColorPalette();
 	}
 }
 
@@ -112,6 +145,7 @@ void write_p3c8(Bitu port,Bitu val,Bitu iolen) {
 	vga.dac.write_index=val;
 	vga.dac.pel_index=0;
 	vga.dac.state=DAC_WRITE;
+    vga.dac.read_index= val - 1;
 }
 
 Bitu read_p3c8(Bitu port, Bitu iolen){
@@ -241,50 +275,14 @@ void VGA_SetupDAC(void) {
 	}
 }
 
-
-
-// save state support
-
-void POD_Save_VGA_Dac( std::ostream& stream )
-{
-	// - pure struct data
-	WRITE_POD( &vga.dac, vga.dac );
-
-
-	// no static globals found
+void VGA_UnsetupDAC(void) {
+    IO_FreeWriteHandler(0x3c6,IO_MB);
+    IO_FreeReadHandler(0x3c6,IO_MB);
+    IO_FreeWriteHandler(0x3c7,IO_MB);
+    IO_FreeReadHandler(0x3c7,IO_MB);
+    IO_FreeWriteHandler(0x3c8,IO_MB);
+    IO_FreeReadHandler(0x3c8,IO_MB);
+    IO_FreeWriteHandler(0x3c9,IO_MB);
+    IO_FreeReadHandler(0x3c9,IO_MB);
 }
 
-
-void POD_Load_VGA_Dac( std::istream& stream )
-{
-	// - pure struct data
-	READ_POD( &vga.dac, vga.dac );
-
-
-	// no static globals found
-}
-
-
-/*
-ykhwong svn-daum 2012-02-20
-
-static globals: none
-
-
-struct VGA_Dac:
-
-// - pure data
-typedef struct {
-	Bit8u bits;
-	Bit8u pel_mask;
-	Bit8u pel_index;	
-	Bit8u state;
-	Bit8u write_index;
-	Bit8u read_index;
-	Bitu first_changed;
-	Bit8u combine[16];
-	RGBEntry rgb[0x100];
-	Bit16u xlat16[256];
-	Bit8u hidac_counter;
-	Bit8u reg02;
-*/
