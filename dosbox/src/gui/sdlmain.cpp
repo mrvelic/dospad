@@ -141,7 +141,7 @@ void MAPPER_Shutdown();
 void SHELL_Init(void);
 
 void UpdateWindowMaximized(bool flag) {
-    menu.maxwindow = flag;
+    //menu.maxwindow = flag;
 }
 
 void UpdateWindowDimensions(Bitu width, Bitu height) {
@@ -489,17 +489,17 @@ void GFX_SetTitle(Bit32s cycles,Bits frameskip,Bits timing,bool paused){
 	}
 #endif
 
-    if (!menu.hidecycles) {
-        char *p = title + strlen(title); // append to end of string
-
-        sprintf(p,", FPS %2d",(int)frames);
-    }
-
-    if (menu.showrt) {
-        char *p = title + strlen(title); // append to end of string
-
-        sprintf(p,", %2d%%/RT",(int)floor((rtdelta / 10) + 0.5));
-    }
+//    if (!menu.hidecycles) {
+//        char *p = title + strlen(title); // append to end of string
+//
+//        sprintf(p,", FPS %2d",(int)frames);
+//    }
+//
+//    if (menu.showrt) {
+//        char *p = title + strlen(title); // append to end of string
+//
+//        sprintf(p,", %2d%%/RT",(int)floor((rtdelta / 10) + 0.5));
+//    }
 
 	if (paused) strcat(title," PAUSED");
 #if defined(C_SDL2)
@@ -959,8 +959,8 @@ static SDL_Surface * GFX_SetupSurfaceScaledOpenGL(Bit32u sdl_flags, Bit32u bpp) 
 		sdl_flags |= SDL_HWSURFACE;
 	}
     if (fixedWidth == 0 || fixedHeight == 0) {
-        Bitu consider_height = menu.maxwindow ? currentWindowHeight : 0;
-        Bitu consider_width = menu.maxwindow ? currentWindowWidth : 0;
+        Bitu consider_height = 0;
+        Bitu consider_width = 0;
         int final_height = max(consider_height,userResizeWindowHeight);
         int final_width = max(consider_width,userResizeWindowWidth);
 
@@ -1244,8 +1244,8 @@ dosurface:
 
 			/* center the screen in the window */
 			{
-                Bitu consider_height = menu.maxwindow ? currentWindowHeight : height;
-                Bitu consider_width = menu.maxwindow ? currentWindowWidth : width;
+                Bitu consider_height = height;
+                Bitu consider_width = width;
                 int final_height = max(max(consider_height,userResizeWindowHeight),(Bitu)(sdl.clip.y+sdl.clip.h));
                 int final_width = max(max(consider_width,userResizeWindowWidth),(Bitu)(sdl.clip.x+sdl.clip.w));
 				int ax = (final_width - (sdl.clip.x + sdl.clip.w)) / 2;
@@ -2125,14 +2125,14 @@ void change_output(int output) {
 	case 3:
 		change_output(2);
 		sdl.desktop.want_type=SCREEN_OPENGL;
-#if !defined(C_SDL2)
+#if !defined(C_SDL2) && !defined(IPHONEOS)
 		sdl.opengl.bilinear = true;
 #endif
 		break;
 	case 4:
 		change_output(2);
 		sdl.desktop.want_type=SCREEN_OPENGL;
-#if !defined(C_SDL2)
+#if !defined(C_SDL2) && !defined(IPHONEOS)
 		sdl.opengl.bilinear = false; //NB
 #endif
 		break;
@@ -2182,7 +2182,7 @@ void change_output(int output) {
 	if (sdl.draw.callback)
 		(sdl.draw.callback)( GFX_CallBackReset );
 
-#if !defined(C_SDL2)
+#if !defined(C_SDL2) && !defined(IPHONEOS)
 	if(sdl.desktop.want_type==SCREEN_OPENGLHQ) {
 		if(!render.scale.hardware) SetVal("render","scaler",!render.scale.forced?"hardware2x":"hardware2x forced");
 		if(!menu.compatible) {
@@ -2218,7 +2218,7 @@ void GFX_SwitchFullScreen(void)
     if (sdl.desktop.prevent_fullscreen)
         return;
 
-	menu.resizeusing = true;
+	//menu.resizeusing = true;
 
 	sdl.desktop.fullscreen = !sdl.desktop.fullscreen;
 
@@ -2243,7 +2243,7 @@ void GFX_SwitchFullScreen(void)
 
 	LOG_MSG("INFO: switched to %s mode", full ? "full screen" : "window");
 
-#if !defined(C_SDL2)
+#if !defined(C_SDL2) && !defined(IPHONEOS)
 	// (re-)assign menu to window
     void DOSBox_SetSysMenu(void);
     DOSBox_SetSysMenu();
@@ -2409,7 +2409,7 @@ void GFX_EndUpdate( const Bit16u *changedLines ) {
                 }
                 if(changedLines && (changedLines[0] == sdl.draw.height)) 
                     return; 
-                if(!menu.hidecycles && !sdl.desktop.fullscreen) frames++;
+                if(!sdl.desktop.fullscreen) frames++;
 #if !defined(C_SDL2)
                 SDL_Flip(sdl.surface);
 #endif
@@ -2420,7 +2420,7 @@ void GFX_EndUpdate( const Bit16u *changedLines ) {
             } else if (changedLines) {
                 if(changedLines[0] == sdl.draw.height) 
                     return; 
-                if(!menu.hidecycles && !sdl.desktop.fullscreen) frames++;
+                if(!sdl.desktop.fullscreen) frames++;
                 Bitu y = 0, index = 0, rectCount = 0;
                 while (y < sdl.draw.height) {
                     if (!(index & 1)) {
@@ -3066,7 +3066,7 @@ static void HandleVideoResize(void * event) {
 
     /* assume the resize comes from user preference UNLESS the window
      * is fullscreen or maximized */
-    if (!menu.maxwindow && !sdl.desktop.fullscreen && !sdl.init_ignore && NonUserResizeCounter == 0) {
+    if (!sdl.desktop.fullscreen && !sdl.init_ignore && NonUserResizeCounter == 0) {
 		UpdateWindowDimensions();
 		UpdateWindowDimensions(ResizeEvent->w, ResizeEvent->h);
 
@@ -5327,7 +5327,7 @@ int main(int argc, char* argv[]) {
 		SetConsoleCtrlHandler((PHANDLER_ROUTINE) ConsoleEventHandler,TRUE);
 #endif
 
-#if !defined(C_SDL2)
+#if !defined(C_SDL2)&& !defined(IPHONEOS)
 		{
 			int id, major, minor;
 
@@ -5390,10 +5390,10 @@ int main(int argc, char* argv[]) {
 			E_Exit("Can't init SDL %s",SDL_GetError());
 
 		/* -- -- decide whether to show menu in GUI */
-		if (control->opt_nogui || menu.compatible)
-			menu.gui=false;
+		//if (control->opt_nogui || menu.compatible)
+		//	menu.gui=false;
 
-#if !defined(C_SDL2)
+#if !defined(C_SDL2) && !defined(IPHONEOS)
 		{
 			Section_prop *section = static_cast<Section_prop *>(control->GetSection("SDL"));
 			assert(section != NULL);
@@ -5516,7 +5516,7 @@ int main(int argc, char* argv[]) {
 			if (control->opt_fullscreen || sdl_sec->Get_bool("fullscreen")) {
 				LOG(LOG_MISC,LOG_DEBUG)("Going fullscreen immediately, during startup");
 
-#if !defined(C_SDL2)
+#if !defined(C_SDL2) && !defined(IPHONEOS)
                 void DOSBox_SetSysMenu(void);
                 DOSBox_SetSysMenu();
 

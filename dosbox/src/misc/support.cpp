@@ -32,7 +32,6 @@
 #include "debug.h"
 #include "support.h"
 #include "video.h"
-#include "menu.h"
 
 
 void upcase(std::string &str) {

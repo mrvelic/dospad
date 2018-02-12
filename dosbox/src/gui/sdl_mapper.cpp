@@ -2613,7 +2613,7 @@ static struct {
 	{"lessthan",SDLK_LESS},
 #endif
 
-#if defined(C_SDL2)
+#if defined(C_SDL2) || defined(IPHONEOS)
     // TODO??
 #else
 	/* hack for Japanese keyboards with \ and _ */
